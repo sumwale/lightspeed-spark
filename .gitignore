@@ -1,2 +1,21 @@
-*.class
-*.log
+# build
+build-artifacts/
+
+# gradle specific
+.gradle/
+buildOutput.log
+
+# sbt specific
+.cache/
+.history
+.lib/
+
+# Scala-IDE specific
+.idea
+
+# Emacs files
+*#*#
+.#*
+
+# misc
+.DS_Store

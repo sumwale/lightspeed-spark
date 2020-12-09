@@ -1,0 +1,817 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import org.gradle.api.tasks.testing.logging.*
+import org.gradle.internal.logging.*
+
+buildscript {
+  repositories {
+    maven { url 'https://plugins.gradle.org/m2' }
+    mavenCentral()
+  }
+  dependencies {
+    classpath 'io.snappydata:gradle-scalatest:0.25'
+    classpath 'com.github.alisiikh:gradle-scalastyle-plugin:3.4.1'
+    classpath 'com.github.jengelman.gradle.plugins:shadow:6.1.0'
+    classpath 'de.undercouch:gradle-download-task:4.1.1'
+    classpath 'com.netflix.nebula:gradle-ospackage-plugin:8.4.1'
+  }
+}
+
+apply plugin: 'wrapper'
+apply plugin: 'distribution'
+apply plugin: 'nebula.ospackage-base'
+apply plugin: "nebula.ospackage"
+
+def compatibilityMap = [
+  '2.4.0': '2.4', '2.4.1': '2.4', '2.4.2': '2.4', '2.4.3': '2.4', '2.4.4': '2.4', '2.4.5': '2.4', '2.4.6': '2.4', '2.4.7': '2.4',
+  '3.0.0': '3.0', '3.0.1': '3.0.1'
+]
+
+allprojects {
+  // We want to see all test results.  This is equivalent to setting --continue
+  // on the command line.
+  gradle.startParameter.continueOnFailure = true
+
+  tasks.withType(Javadoc) {
+    options.addStringOption('Xdoclint:none', '-quiet')
+    /*
+    if (javax.tools.ToolProvider.getSystemDocumentationTool().isSupportedOption("--allow-script-in-comments") == 0) {
+      options.addBooleanOption("-allow-script-in-comments", true)
+    }
+    */
+  }
+
+  repositories {
+    mavenCentral()
+  }
+
+  apply plugin: 'java'
+  apply plugin: 'maven'
+  apply plugin: 'idea'
+  apply plugin: 'com.github.johnrengelman.shadow'
+
+  group = 'io.lightspeed-spark'
+  version = '0.1.0'
+
+  // apply compiler options
+  tasks.withType(JavaCompile) {
+    options.encoding = 'UTF-8'
+    options.incremental = true
+    options.compilerArgs << '-Xlint:-serial,-path,-deprecation,-unchecked,-rawtypes,-try'
+    options.compilerArgs << '-XDignore.symbol.file'
+    options.fork = true
+    options.forkOptions.javaHome = file(System.properties['java.home'])
+    options.forkOptions.jvmArgs = [ '-J-Xmx2g', '-J-Xms2g', '-J-XX:ReservedCodeCacheSize=512m', '-J-Djava.net.preferIPv4Stack=true' ]
+  }
+  tasks.withType(ScalaCompile) {
+    options.encoding = 'UTF-8'
+    options.fork = true
+    options.forkOptions.jvmArgs = [ '-Xmx2g', '-Xms2g', '-XX:ReservedCodeCacheSize=512m', '-Djava.net.preferIPv4Stack=true' ]
+    // scalaCompileOptions.optimize = true
+    // scalaCompileOptions.useAnt = false
+    scalaCompileOptions.deprecation = false
+    scalaCompileOptions.additionalParameters = [ '-feature', '-explaintypes', '-Yno-adapted-args' ]
+  }
+
+  javadoc.options.charSet = 'UTF-8'
+
+  ext {
+    productName = 'LightSpeed Spark'
+    vendorName = 'LightSpeed Spark'
+    scalaBinaryVersion = '2.12'
+
+    sparkVersion = '3.0.1'
+    sparkPackageName = "lightspeed-spark-${version}_${sparkVersion}-s_${scalaBinaryVersion}"
+    sparkDistName = "spark-${sparkVersion}-bin-hadoop2.7"
+
+    scalaVersion = scalaBinaryVersion + '.10'
+    guavaVersion = '14.0.1'
+    derbyVersion = '10.12.1.1'
+    hadoopVersion = '2.7.4'
+    slf4jVersion = '1.7.30'
+    junitVersion = '4.12'
+    scalatestVersion = '3.0.8'
+    pegdownVersion = '1.6.0'
+
+    buildFlags = ''
+    createdBy = System.getProperty('user.name')
+    osArch = System.getProperty('os.arch')
+    osName = org.gradle.internal.os.OperatingSystem.current()
+    osFamilyName = osName.getFamilyName().replace(' ', '').toLowerCase()
+    osVersion = System.getProperty('os.version')
+    buildDate = new Date().format('yyyy-MM-dd HH:mm:ss Z')
+    buildDateShort = ''
+    if (rootProject.hasProperty('withDate')) {
+      buildDateShort = "${new Date().format('yyyyMMdd')}_"
+    }
+    devEdition = ''
+    if (rootProject.hasProperty('dev')) {
+      devEdition = "-dev"
+    }
+    buildNumber = new Date().format('MMddyy')
+    jdkVersion = System.getProperty('java.version')
+
+    gitCmd = "git --git-dir=${rootDir}/.git --work-tree=${rootDir}"
+    gitBranch = "${gitCmd} rev-parse --abbrev-ref HEAD".execute().text.trim()
+    commitId = "${gitCmd} rev-parse HEAD".execute().text.trim()
+    sourceDate = "${gitCmd} log -n 1 --format=%ai".execute().text.trim()
+
+    sparkDistDir = "${project.gradle.gradleUserHomeDir}/sparkDist"
+    sparkProductDir = "${sparkDistDir}/${sparkDistName}"
+  }
+
+  // default output directory suffix like in sbt/maven
+  buildDir = 'build-artifacts/scala-' + scalaBinaryVersion
+
+  ext {
+    productDir = "${rootProject.buildDir}/lightspeed-spark"
+    testResultsBase = "${rootProject.buildDir}/tests/lightspeed-spark"
+
+    // common libraries used in core and core-product modules
+    coreLibraries = [
+      common: [
+        "org.scala-lang:scala-library:${scalaVersion}",
+        "org.scala-lang:scala-reflect:${scalaVersion}",
+        "org.slf4j:slf4j-api:${slf4jVersion}"
+      ],
+      spark: [
+        "org.apache.spark:spark-core_${scalaBinaryVersion}:${sparkVersion}",
+        "org.apache.spark:spark-catalyst_${scalaBinaryVersion}:${sparkVersion}",
+        "org.apache.spark:spark-sql_${scalaBinaryVersion}:${sparkVersion}",
+        "org.apache.spark:spark-hive_${scalaBinaryVersion}:${sparkVersion}",
+        "org.apache.spark:spark-streaming_${scalaBinaryVersion}:${sparkVersion}",
+        "org.apache.spark:spark-streaming-kafka-0-10_${scalaBinaryVersion}:${sparkVersion}",
+        "org.apache.spark:spark-sql-kafka-0-10_${scalaBinaryVersion}:${sparkVersion}",
+        "org.apache.spark:spark-mllib_${scalaBinaryVersion}:${sparkVersion}",
+      ]
+    ]
+  }
+
+  // force same output directory for IDEA and gradle
+  idea {
+    module {
+      def projOutDir = file("${projectDir}/src/main/scala").exists()
+        ? "${project.sourceSets.main.java.outputDir}/../../scala/main"
+        : project.sourceSets.main.java.outputDir
+      def projTestOutDir = file("${projectDir}/src/test/scala").exists()
+        ? "${project.sourceSets.test.java.outputDir}/../../scala/test"
+        : project.sourceSets.test.java.outputDir
+      outputDir file(projOutDir)
+      testOutputDir file(projTestOutDir)
+    }
+  }
+}
+
+def getStackTrace(def t) {
+  java.io.StringWriter sw = new java.io.StringWriter()
+  java.io.PrintWriter pw = new java.io.PrintWriter(sw)
+  org.codehaus.groovy.runtime.StackTraceUtils.sanitize(t).printStackTrace(pw)
+  return sw.toString()
+}
+
+def cleanIntermediateFiles(def projectName) {
+  def projDir = "${project(projectName).projectDir}"
+  delete "${projDir}/metastore_db"
+  delete "${projDir}/warehouse"
+}
+
+def now() {
+  return new Date().format('yyyy-MM-dd HH:mm:ss.SSS Z')
+}
+
+task cleanScalaTest { doLast {
+  String workingDir = "${testResultsBase}/scalatest"
+  delete workingDir
+  file(workingDir).mkdirs()
+} }
+task cleanJUnit { doLast {
+  String workingDir = "${testResultsBase}/junit"
+  delete workingDir
+  file(workingDir).mkdirs()
+} }
+task cleanAllReports { doLast {
+  String workingDir = "${testResultsBase}/combined-reports"
+  delete workingDir
+  file(workingDir).mkdirs()
+} }
+
+subprojects {
+
+  apply plugin: 'com.github.alisiikh.scalastyle'
+
+  scalastyle {
+    scalaVersion = scalaBinaryVersion
+    config = file("${rootProject.projectDir}/scalastyle-config.xml")
+    inputEncoding = 'UTF-8'
+    outputEncoding = 'UTF-8'
+    failOnWarning = true
+
+    sourceSets {
+      main {
+        output = file("${buildDir}/scalastyle-main-output.xml")
+      }
+      test {
+        output = file("${buildDir}/scalastyle-test-output.xml")
+      }
+    }
+  }
+
+  task scalaTest(type: Test) {
+    actions = [ new com.github.maiflai.ScalaTestAction() ]
+    // top-level default is single process run since scalatest does not
+    // spawn separate JVMs
+    maxParallelForks = 1
+    minHeapSize '4g'
+    maxHeapSize '4g'
+    jvmArgs '-ea', '-XX:+HeapDumpOnOutOfMemoryError','-XX:+UseConcMarkSweepGC', '-XX:MaxNewSize=1g',
+            '-XX:+UseParNewGC', '-XX:+CMSClassUnloadingEnabled', '-Xss4m', '-XX:ReservedCodeCacheSize=1g'
+    // for benchmarking
+    // minHeapSize '12g'
+    // maxHeapSize '12g'
+    // jvmArgs '-XX:+HeapDumpOnOutOfMemoryError','-XX:+UseConcMarkSweepGC', '-XX:MaxNewSize=2g',
+    //        '-XX:+UseParNewGC', '-XX:+CMSClassUnloadingEnabled', '-Xss4m', '-XX:ReservedCodeCacheSize=1g'
+    testLogging.exceptionFormat = TestExceptionFormat.FULL
+    testLogging.events = TestLogEvent.values() as Set
+
+    extensions.add(com.github.maiflai.ScalaTestAction.TAGS, new org.gradle.api.tasks.util.PatternSet())
+    List<String> suites = []
+    extensions.add(com.github.maiflai.ScalaTestAction.SUITES, suites)
+    extensions.add('suite', { String name -> suites.add(name) } )
+    extensions.add('suites', { String... name -> suites.addAll(name) } )
+
+    def result = new StringBuilder()
+    extensions.add(com.github.maiflai.ScalaTestAction.TESTRESULT, result)
+    extensions.add('testResult', { String name -> result.setLength(0); result.append(name) } )
+
+    def output = new StringBuilder()
+    extensions.add(com.github.maiflai.ScalaTestAction.TESTOUTPUT, output)
+    extensions.add('testOutput', { String name -> output.setLength(0); output.append(name) })
+
+    def errorOutput = new StringBuilder()
+    extensions.add(com.github.maiflai.ScalaTestAction.TESTERROR, errorOutput)
+    extensions.add('testError', { String name -> errorOutput.setLength(0); errorOutput.append(name) })
+
+    // running a single scala suite
+    if (rootProject.hasProperty('singleSuite')) {
+      suite singleSuite
+    }
+    workingDir = "${testResultsBase}/scalatest"
+
+    // testResult '/dev/tty'
+    testOutput "${workingDir}/output.txt"
+    testError "${workingDir}/error.txt"
+    binResultsDir = file("${workingDir}/binary/${project.name}")
+    reports.html.destination = file("${workingDir}/html/${project.name}")
+    reports.junitXml.destination = file(workingDir)
+  }
+  test {
+    maxParallelForks = Runtime.getRuntime().availableProcessors()
+    maxHeapSize '2g'
+    jvmArgs '-ea', '-XX:+HeapDumpOnOutOfMemoryError','-XX:+UseConcMarkSweepGC',
+            '-XX:+UseParNewGC', '-XX:+CMSClassUnloadingEnabled'
+    testLogging.exceptionFormat = TestExceptionFormat.FULL
+
+    def single = System.getProperty('junit.single')
+    if (single == null || single.length() == 0) {
+      single = rootProject.hasProperty('junit.single') ?
+          rootProject.property('junit.single') : null
+    }
+    if (single == null || single.length() == 0) {
+      include '**/*.class'
+      exclude '**/*TestBase.class'
+      exclude '**/*DUnit*.class'
+    } else {
+      include single
+    }
+
+    workingDir = "${testResultsBase}/junit"
+
+    binResultsDir = file("${workingDir}/binary/${project.name}")
+    reports.html.destination = file("${workingDir}/html/${project.name}")
+    reports.junitXml.destination = file(workingDir)
+
+    doFirst {
+      String eol = System.getProperty('line.separator')
+      String now = new Date().format('yyyy-MM-dd HH:mm:ss.SSS Z')
+      def progress = new File(workingDir, 'progress.txt')
+      progress << "${eol}${now} ========== STARTING JUNIT TEST SUITE FOR ${project.name} ==========${eol}${eol}"
+    }
+  }
+
+  // apply default manifest
+  if (rootProject.hasProperty('enablePublish')) {
+    createdBy = vendorName
+  }
+  jar {
+    manifest {
+      attributes(
+        'Manifest-Version'  : '1.0',
+        'Created-By'        : createdBy,
+        'Title'             : rootProject.name,
+        'Version'           : version,
+        'Vendor'            : vendorName
+      )
+    }
+  }
+
+  configurations {
+    testOutput {
+      extendsFrom testCompile
+      description 'a dependency that exposes test artifacts'
+    }
+    /*
+    all {
+      resolutionStrategy {
+        // fail eagerly on version conflict (includes transitive dependencies)
+        // e.g. multiple different versions of the same dependency (group and name are equal)
+        failOnVersionConflict()
+      }
+    }
+    */
+  }
+
+  // force versions for some dependencies that get pulled multiple times
+  configurations.all {
+    resolutionStrategy.force "com.google.guava:guava:${guavaVersion}",
+      "org.apache.derby:derby:${derbyVersion}",
+      "org.apache.hadoop:hadoop-annotations:${hadoopVersion}",
+      "org.apache.hadoop:hadoop-auth:${hadoopVersion}",
+      "org.apache.hadoop:hadoop-client:${hadoopVersion}",
+      "org.apache.hadoop:hadoop-common:${hadoopVersion}",
+      "org.apache.hadoop:hadoop-hdfs:${hadoopVersion}",
+      "org.apache.hadoop:hadoop-mapreduce-client-app:${hadoopVersion}",
+      "org.apache.hadoop:hadoop-mapreduce-client-common:${hadoopVersion}",
+      "org.apache.hadoop:hadoop-mapreduce-client-core:${hadoopVersion}",
+      "org.apache.hadoop:hadoop-mapreduce-client-jobclient:${hadoopVersion}",
+      "org.apache.hadoop:hadoop-mapreduce-client-shuffle:${hadoopVersion}",
+      "org.apache.hadoop:hadoop-yarn-api:${hadoopVersion}",
+      "org.apache.hadoop:hadoop-yarn-client:${hadoopVersion}",
+      "org.apache.hadoop:hadoop-yarn-common:${hadoopVersion}",
+      "org.apache.hadoop:hadoop-yarn-server-common:${hadoopVersion}",
+      "org.apache.hadoop:hadoop-yarn-server-nodemanager:${hadoopVersion}",
+      "org.apache.hadoop:hadoop-yarn-server-web-proxy:${hadoopVersion}"
+    exclude(group: 'org.mortbay.jetty', module: 'servlet-api')
+  }
+
+  task packageTests(type: Jar, dependsOn: testClasses) {
+    description 'Assembles a jar archive of test classes.'
+    classifier = 'tests'
+  }
+  artifacts {
+    testOutput packageTests
+  }
+
+  dependencies {
+    compile 'org.slf4j:slf4j-api:' + slf4jVersion
+
+    testCompile "junit:junit:${junitVersion}"
+  }
+}
+
+// maven publish tasks
+subprojects {
+
+  apply plugin: 'signing'
+
+  task packageSources(type: Jar, dependsOn: classes) {
+    classifier = 'sources'
+    from sourceSets.main.allSource
+  }
+  task packageDocs(type: Jar, dependsOn: javadoc) {
+    classifier = 'javadoc'
+    from javadoc
+  }
+  if (rootProject.hasProperty('enablePublish')) {
+    signing {
+      sign configurations.archives
+    }
+
+    uploadArchives {
+      repositories {
+        mavenDeployer {
+          beforeDeployment { MavenDeployment deployment -> signing.signPom(deployment) }
+
+          repository(url: 'https://oss.sonatype.org/service/local/staging/deploy/maven2/') {
+            authentication(userName: ossrhUsername, password: ossrhPassword)
+          }
+          snapshotRepository(url: 'https://oss.sonatype.org/content/repositories/snapshots/') {
+            authentication(userName: ossrhUsername, password: ossrhPassword)
+          }
+
+          pom.project {
+	    name 'LightSpeed Spark'
+            packaging 'jar'
+            // optionally artifactId can be defined here
+            description 'LightSpeed Spark optimizations to Apache Spark'
+            url 'http://www.lightspeed-spark.io'
+
+            scm {
+              connection 'scm:git:https://github.com/sumwale/lightspeed-spark.git'
+              developerConnection 'scm:git:https://github.com/sumwale/lightspeed-spark.git'
+              url 'https://github.com/sumwale/lightspeed-spark'
+            }
+
+            licenses {
+              license {
+                name 'The Apache License, Version 2.0'
+                url 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+              }
+            }
+
+            developers {
+              developer {
+                id 'sumwale'
+                name 'Sumedh Wale'
+                email 'sumwale@gmail.com'
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// apply common test and misc configuration
+gradle.taskGraph.whenReady { graph ->
+
+  def allTasks = subprojects.collect { it.tasks }.flatten()
+  allTasks.each { task ->
+    if (task instanceof Tar) {
+      def tar = (Tar)task
+      tar.compression = Compression.GZIP
+      tar.extension = 'tar.gz'
+    } else if (task instanceof Jar) {
+      def pack = (Jar)task
+      if (pack.name == 'packageTests') {
+        pack.from(pack.project.sourceSets.test.output.classesDirs, pack.project.sourceSets.test.resources.srcDirs)
+      }
+    } else if (task instanceof Test) {
+      def test = (Test)task
+      test.configure {
+
+        environment 'APACHE_SPARK_HOME': sparkProductDir,
+          'SPARK_TESTING': '1',
+          'TEST_DIST_CLASSPATH': test.classpath.asPath
+
+        def failureCount = new java.util.concurrent.atomic.AtomicInteger(0)
+        def progress = new File(workingDir, 'progress.txt')
+        def output = new File(workingDir, 'output.txt')
+
+        String eol = System.getProperty('line.separator')
+        beforeTest { desc ->
+          String now = now()
+          progress << "${now} Starting test ${desc.className} ${desc.name}${eol}"
+          output << "${now} STARTING TEST ${desc.className} ${desc.name}${eol}${eol}"
+        }
+        onOutput { desc, event ->
+          String msg = event.message
+          if (event.destination.toString() == 'StdErr') {
+            msg = msg.replace(eol, "${eol}[error]  ")
+          }
+          output << msg
+        }
+        afterTest { desc, result ->
+          String now = now()
+          progress << "${now} Completed test ${desc.className} ${desc.name} with result: ${result.resultType}${eol}"
+          output << "${eol}${now} COMPLETED TEST ${desc.className} ${desc.name} with result: ${result.resultType}${eol}${eol}"
+          def exceptions = result.exceptions
+          if (exceptions.size() > 0) {
+            exceptions.each { t ->
+              progress << "  EXCEPTION: ${getStackTrace(t)}${eol}"
+              output << "${getStackTrace(t)}${eol}"
+            }
+            failureCount.incrementAndGet()
+          }
+        }
+        doLast {
+          def report = "${test.reports.html.destination}/index.html"
+          boolean hasProgress = progress.exists()
+          if (failureCount.get() > 0) {
+            println()
+            def failureMsg = "FAILED: There were ${failureCount.get()} failures.${eol}"
+            if (hasProgress) {
+              failureMsg    += "        See the progress report in: file://$progress${eol}"
+            }
+            failureMsg    += "        HTML report in: file://$report"
+            throw new GradleException(failureMsg)
+          } else if (hasProgress) {
+            println()
+            println("SUCCESS: See the progress report in: file://$progress")
+            println("         HTML report in: file://$report")
+            println()
+          } else {
+            println()
+            println("SUCCESS: See the HTML report in: file://$report")
+            println()
+          }
+        }
+      }
+    }
+  }
+}
+
+
+task publishLocal {
+  dependsOn subprojects.collect {
+    it.getTasksByName('install', false).collect { it.path }
+  }
+}
+
+task publishMaven {
+  dependsOn subprojects.collect {
+    it.getTasksByName('uploadArchives', false).collect { it.path }
+  }
+}
+
+task product(type: Zip) {
+  dependsOn ":lightspeed-core_${scalaBinaryVersion}:jar"
+  dependsOn ':copyShadowJars'
+
+  def coreProject = project(":lightspeed-core_${scalaBinaryVersion}")
+  def targetProject = coreProject
+
+  doLast {
+    // copy all runtime dependencies of targetProject
+    def targets = targetProject.configurations.runtime
+    copy {
+      from(targets) {
+        // exclude scalatest included by spark-tags
+        exclude '**scalatest*.jar'
+        // exclude other test jars
+        exclude '**junit*.jar'
+        exclude '**mockito*.jar'
+        exclude '**hamcrest-core*.jar'
+        exclude '**test-interface*.jar'
+        exclude '**scalacheck*.jar'
+      }
+      from targetProject.jar.outputs
+      into "${productDir}/jars"
+    }
+
+    // create the RELEASE file
+    def releaseFile = file("${productDir}/RELEASE")
+    String gitRevision = "${gitCmd} rev-parse --short HEAD".execute().text.trim()
+    if (gitRevision.length() > 0) {
+      gitRevision = " (git revision ${gitRevision})"
+    }
+
+    releaseFile.append("LightSpeed Spark ${version}${gitRevision} built for Spark ${sparkVersion}.\n")
+
+    // copy LICENSE, README.md and doc files
+    copy {
+      from projectDir
+      into productDir
+      include 'LICENSE'
+      include 'NOTICE'
+      include 'README.md'
+    }
+    copy {
+      from "${projectDir}/docs"
+      into "${productDir}/docs"
+    }
+
+    copy {
+      from("${coreProject.projectDir}/conf")
+      into "${productDir}/conf"
+    }
+  }
+}
+
+if (rootProject.hasProperty('copyToDir')) {
+  task copyProduct(type: Copy, dependsOn: product) {
+    from productDir
+    into copyToDir
+  }
+}
+
+distributions {
+  main {
+    baseName = 'lightspeed-spark'
+    contents {
+      from { productDir }
+    }
+  }
+}
+
+ospackage {
+  packageName = distributions.main.baseName
+  version = version
+  release = '1'
+  os = LINUX
+
+  maintainer = vendorName
+  packageDescription = productName +
+      ', taking Spark performance to next level.'
+  summary = productName + ' Installer'
+
+  user = 'spark'
+  permissionGroup = 'spark'
+
+  from(productDir) {
+    into '/opt/' + packageName
+  }
+
+  if (rootProject.hasProperty('enablePublish')) {
+    signingKeyId = rootProject.property('signing.keyId')
+    signingKeyPassphrase = rootProject.property('signing.password')
+    signingKeyRingFile = file(rootProject.property('signing.secretKeyRingFile'))
+  }
+
+  link('/usr/sbin/spark-start-all.sh', "/opt/${packageName}/sbin/start-all.sh")
+  link('/usr/sbin/spark-stop-all.sh', "/opt/${packageName}/sbin/stop-all.sh")
+  link('/usr/sbin/spark-start-thriftserver.sh', "/opt/${packageName}/sbin/start-thriftserver.sh")
+  link('/usr/sbin/spark-stop-thriftserver.sh', "/opt/${packageName}/sbin/stop-thriftserver.sh")
+  link('/usr/bin/spark-sql', "/opt/${packageName}/bin/beeline")
+  link('/usr/bin/spark-cli', "/opt/${packageName}/bin/spark-sql")
+  link('/usr/bin/spark-shell', "/opt/${packageName}/bin/spark-shell")
+  link('/usr/bin/spark-submit', "/opt/${packageName}/bin/spark-submit")
+}
+
+buildRpm {
+  requires('glibc')
+  requires('bash')
+  requires('perl')
+  requires('curl')
+
+  preInstall file('release/preInstallRpm.sh')
+}
+
+buildDeb {
+  requires('libc6')
+  requires('bash')
+  requires('perl')
+  requires('curl')
+  recommends('java11-sdk')
+
+  preInstall file('release/preInstallDeb.sh')
+}
+
+distTar {
+  archiveName = 'lightspeed-spark_' + version + '_' + osFamilyName + '.tar.gz'
+  dependsOn product
+  compression = Compression.GZIP
+  extension = 'tar.gz'
+}
+
+distZip {
+  archiveName = 'lightspeed-spark_' + version + '_' + osFamilyName + '.zip'
+  dependsOn product
+}
+
+// disable distZip by default
+assemble.dependsOn.clear()
+assemble.dependsOn product, distTar
+
+task distRpm {
+  dependsOn product
+  dependsOn buildRpm
+}
+
+task distDeb {
+  dependsOn product
+  dependsOn buildDeb
+}
+
+task copyShadowJars {
+  dependsOn ":lightspeed-core_${scalaBinaryVersion}:shadowJar"
+
+  doLast {
+    def coreProject = project(":lightspeed-core_${scalaBinaryVersion}")
+    String productJarName = "lightspeed-spark${sparkVersion}_${scalaBinaryVersion}-${version}.jar"
+    copy {
+      from coreProject.shadowJar.destinationDir
+      into "${rootProject.buildDir}/distributions"
+      include coreProject.shadowJar.archiveName
+      rename { filename -> productJarName }
+    }
+  }
+}
+
+task distInstallers {
+  dependsOn product
+  dependsOn buildRpm
+  dependsOn buildDeb
+}
+
+// use the task below to prepare final release bits
+task distProduct {
+  dependsOn product, distTar, distZip
+  dependsOn distInstallers
+}
+
+task cleanAll {
+  dependsOn getTasksByName('clean', true).collect { it.path }
+}
+def taskFilter(Task p) {
+  !p.path.matches('.*compat-spark.*')
+}
+task buildAll {
+  dependsOn getTasksByName('assemble', true).findAll { taskFilter(it) }.collect { it.path }
+  dependsOn getTasksByName('product', true).findAll { taskFilter(it) }.collect { it.path }
+  dependsOn getTasksByName('testClasses', true).findAll { taskFilter(it) }.collect { it.path }
+  dependsOn getTasksByName('scalastyle', true).findAll { taskFilter(it) }.collect { it.path }
+  dependsOn ':copyShadowJars'
+  mustRunAfter cleanAll
+}
+task checkAll {
+  dependsOn getTasksByName('scalastyle', true).findAll { taskFilter(it) }.collect { it.path }
+  dependsOn ":lightspeed-core_${scalaBinaryVersion}:check"
+  mustRunAfter buildAll
+}
+task allReports(type: TestReport) {
+  description 'Combines the test reports.'
+  dependsOn cleanAllReports
+  destinationDir = file("${testResultsBase}/combined-reports")
+  mustRunAfter checkAll
+}
+gradle.taskGraph.whenReady { graph ->
+  tasks.getByName('allReports').reportOn rootProject.subprojects.collect{ it.tasks.withType(Test) }.flatten()
+}
+
+task sparkPackage {
+  dependsOn ":lightspeed-core_${scalaBinaryVersion}:sparkPackage"
+}
+
+distTar.mustRunAfter clean, cleanAll, product
+distZip.mustRunAfter clean, cleanAll, product
+distRpm.mustRunAfter clean, cleanAll, product
+distDeb.mustRunAfter clean, cleanAll, product
+distInstallers.mustRunAfter clean, cleanAll, product, distRpm, distDeb
+distProduct.mustRunAfter clean, cleanAll, product
+
+task deleteDocsDir(type: Delete) {
+  delete "${rootProject.buildDir}/docs"
+}
+
+task docs(type: ScalaDoc) {
+  apply plugin: 'scala'
+
+  scalaDocOptions.additionalParameters = [ '-J-Xmx7g', '-J-XX:ReservedCodeCacheSize=512m', '-J-Djava.net.preferIPv4Stack=true' ]
+
+  dependsOn deleteDocsDir
+  Set<String> allSource = []
+  def docProjects = rootProject.subprojects.collectMany { project ->
+    if ((project.plugins.hasPlugin('scala') || project.plugins.hasPlugin('java')) &&
+            // exclude tests
+            !project.name.contains('tests')) {
+      allSource.addAll(project.sourceSets.main.allJava.findAll {
+        !it.getPath().matches('.*/internal/.*')
+      })
+
+      if (project.plugins.hasPlugin('scala')) {
+        allSource.addAll(project.sourceSets.main.allScala.findAll {
+          !it.getPath().matches('.*org/apache/spark/sql/execution/debug/package.*')
+        })
+      }
+      [ project ]
+    } else []
+  }
+  source = allSource
+  classpath = files(docProjects.collect { project ->
+   project.sourceSets.main.compileClasspath
+  })
+  destinationDir = file("${rootProject.buildDir}/docs")
+}
+
+
+task precheckin {
+  dependsOn cleanAll, buildAll, checkAll, allReports, docs
+}
+
+// log build output to buildOutput.log in addition to console output
+
+def buildOutput = new File("${rootDir}/buildOutput.log")
+// delete build output file if it has become large
+if (buildOutput.length() > 1000000) {
+  delete buildOutput
+}
+def gradleLogger = new org.gradle.api.logging.StandardOutputListener() {
+  void onOutput(CharSequence output) {
+    buildOutput << output
+  }
+}
+def loggerService = gradle.services.get(LoggingOutputInternal)
+loggerService.addStandardOutputListener(gradleLogger)
+loggerService.addStandardErrorListener(gradleLogger)
+
+println()
+println('-------------------------------------------------')
+println("Starting new build on ${buildDate}")
+println('-------------------------------------------------')
+println()

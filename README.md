@@ -1,2 +1,3 @@
-# lightspeed-spark
-Bunch of optimization on top of Apache Spark to truly make it "lightspeed"
+# LightSpeed Spark
+
+Bunch of optimizations for Apache Spark to truly make it "lightspeed"
