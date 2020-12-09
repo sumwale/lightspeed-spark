@@ -17,8 +17,6 @@
 
 package io.spark.lightspeed.memory
 
-import com.google.common.base.FinalizableReferenceQueue
-
 /**
  * Interface for a generic manager for in-memory objects that need to be evicted when running low
  * on memory. Two kinds of objects namely compressed and decompressed should be supported by
@@ -54,28 +52,11 @@ trait EvictionManager[C, D] {
    * Get the compressed version of the object for given key. The provided key object should
    * be same as that that returned by resulting object's [[CacheObject.key]] for consistency.
    */
-  def getCompressed(key: AnyRef): Option[C]
+  def getCompressed(key: Comparable[AnyRef]): Option[CompressedCacheObject[C, D]]
 
   /**
    * Get the decompressed version of the object for given key. The provided key object should
    * be same as that that returned by resulting object's [[CacheObject.key]] for consistency.
    */
-  def getDecompressed(key: AnyRef): Option[D]
-
-  /**
-   * Explicitly remove an object from the cache. Returns true if object was present and
-   * remove was successful.
-   */
-  def removeObject(key: AnyRef): Boolean
-
-  /**
-   * Explicitly run eviction on the entire cache and return the objects evicted as a result.
-   * Note that the returned objects are still usable and will not be `release`d unlike the
-   * internal eviction done by the [[EvictionManager]].
-   */
-  def runEviction(): Seq[CacheObject[C]]
-}
-
-object EvictionManager {
-  private[memory] lazy val finalizerQueue = new FinalizableReferenceQueue
+  def getDecompressed(key: Comparable[AnyRef]): Option[DecompressedCacheObject[D, C]]
 }

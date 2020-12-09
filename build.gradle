@@ -727,12 +727,12 @@ task buildAll {
   dependsOn getTasksByName('assemble', true).findAll { taskFilter(it) }.collect { it.path }
   dependsOn getTasksByName('product', true).findAll { taskFilter(it) }.collect { it.path }
   dependsOn getTasksByName('testClasses', true).findAll { taskFilter(it) }.collect { it.path }
-  dependsOn getTasksByName('scalastyle', true).findAll { taskFilter(it) }.collect { it.path }
+  dependsOn getTasksByName('scalastyleCheck', true).findAll { taskFilter(it) }.collect { it.path }
   dependsOn ':copyShadowJars'
   mustRunAfter cleanAll
 }
 task checkAll {
-  dependsOn getTasksByName('scalastyle', true).findAll { taskFilter(it) }.collect { it.path }
+  dependsOn getTasksByName('scalastyleCheck', true).findAll { taskFilter(it) }.collect { it.path }
   dependsOn ":lightspeed-core_${scalaBinaryVersion}:check"
   mustRunAfter buildAll
 }

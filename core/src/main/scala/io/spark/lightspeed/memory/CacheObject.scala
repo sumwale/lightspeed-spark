@@ -17,7 +17,7 @@
 
 package io.spark.lightspeed.memory
 
-import com.google.common.base.FinalizableWeakReference
+import com.google.common.base.{FinalizableReferenceQueue, FinalizableWeakReference}
 
 /**
  * An object that is maintained in-memory (either on-heap or off-heap depending on the actual
@@ -36,7 +36,7 @@ sealed trait CacheObject[T] extends FinalizableWeakReference[T] {
   /**
    * A unique key for the object. This can possibly be this object itself.
    */
-  def key: AnyRef
+  def key: Comparable[AnyRef]
 
   /**
    * Size in bytes occupied by the object in memory including the key.
@@ -53,6 +53,14 @@ sealed trait CacheObject[T] extends FinalizableWeakReference[T] {
    * or will be used when it is compressed if not.
    */
   def compressionAlgorithm: String
+
+  /**
+   * Returns true if this object is managed by [[EvictionManager]] or else created on-the-fly.
+   * For the latter case it is the caller's responsibility to [[finalizeReferent]] explicitly.
+   */
+  def isManaged: Boolean = managed
+
+  @volatile private[memory] var managed: Boolean = _
 
   /**
    * Used internally and should only be accessed/updated within synchronized block.
@@ -99,12 +107,12 @@ sealed trait CacheObject[T] extends FinalizableWeakReference[T] {
    * Any further accesses to this object can result in undefined behaviour after
    * this method call. Specifically accessing off-heap objects after this method
    * has been invoked can lead to a JVM crash. Normally used by
-   * [[EvictionManager.runEviction]] when an object is evicted. This will honour
-   * [[work]] method on the object and wait for the method to end.
+   * [[EvictionManager]] when an object is evicted. This will honour [[work]] and [[startWork]]
+   * methods on the object and wait for the method to end.
    */
-  private[memory] final def release(waitForMillis: Long): Unit = synchronized {
+  private[memory] final def release(waitForMillis: Long): Boolean = synchronized {
     if (inUse > 0) {
-      val loopMillis = if (waitForMillis > 10) 10 else waitForMillis
+      val loopMillis = if (waitForMillis > 10L) 10L else waitForMillis
       var remaining = waitForMillis
       while (remaining > 0) {
         try {
@@ -117,7 +125,10 @@ sealed trait CacheObject[T] extends FinalizableWeakReference[T] {
         }
       }
     }
-    if (inUse == 0) finalizeReferent()
+    if (inUse == 0) {
+      finalizeReferent()
+      true
+    } else false
   }
 
   /**
@@ -128,6 +139,14 @@ sealed trait CacheObject[T] extends FinalizableWeakReference[T] {
   protected val doFinalize: Any => Unit
 
   override def finalizeReferent(): Unit = doFinalize(get())
+
+  private[memory] def reset(): Unit = {
+    managed = false
+    inUse = 0
+    weightage = 0.0
+    nextInQueue = null
+    previousInQueue = null
+  }
 
   /**
    * Get/Set the cost to transform from decompressed form to compressed and vice-versa.
@@ -154,6 +173,10 @@ sealed trait CacheObject[T] extends FinalizableWeakReference[T] {
   private[memory] var nextInQueue: CacheObject[T] = _
 }
 
+object CacheObject {
+  private[memory] lazy val finalizerQueue = new FinalizableReferenceQueue
+}
+
 /**
  * Implementation of compressed object for [[CacheObject]]. Apart from other useful methods,
  * this contains a `decompress` method used by [[EvictionManager]] which uses a closure provided
@@ -163,7 +186,7 @@ sealed trait CacheObject[T] extends FinalizableWeakReference[T] {
  * @tparam D the type of decompressed object obtained after decompression
  */
 final class CompressedCacheObject[C, D](
-    override val key: AnyRef,
+    override val key: Comparable[AnyRef],
     _value: C,
     override val memorySize: Long,
     override val compressionAlgorithm: String,
@@ -171,7 +194,7 @@ final class CompressedCacheObject[C, D](
     private val compressObject: D => C,
     private val decompressObject: C => (D, Long),
     override protected val doFinalize: Any => Unit)
-    extends FinalizableWeakReference[C](_value, EvictionManager.finalizerQueue)
+    extends FinalizableWeakReference[C](_value, CacheObject.finalizerQueue)
     with CacheObject[C] {
 
   override def isCompressed: Boolean = true
@@ -204,7 +227,7 @@ final class CompressedCacheObject[C, D](
  * @tparam C the type of compressed object obtained after compression
  */
 final class DecompressedCacheObject[D, C](
-    override val key: AnyRef,
+    override val key: Comparable[AnyRef],
     _value: D,
     override val memorySize: Long,
     override val compressionAlgorithm: String,
@@ -212,7 +235,7 @@ final class DecompressedCacheObject[D, C](
     private val compressObject: D => C,
     private val decompressObject: C => (D, Long),
     override protected val doFinalize: Any => Unit)
-    extends FinalizableWeakReference[D](_value, EvictionManager.finalizerQueue)
+    extends FinalizableWeakReference[D](_value, CacheObject.finalizerQueue)
     with CacheObject[D] {
 
   override def isCompressed: Boolean = false
