@@ -65,7 +65,7 @@ allprojects {
   apply plugin: 'idea'
   apply plugin: 'com.github.johnrengelman.shadow'
 
-  group = 'io.lightspeed-spark'
+  group = 'io.spark.lightspeed'
   version = '0.1.0'
 
   // apply compiler options
@@ -96,7 +96,7 @@ allprojects {
     scalaBinaryVersion = '2.12'
 
     sparkVersion = '3.0.1'
-    sparkPackageName = "lightspeed-spark-${version}_${sparkVersion}-s_${scalaBinaryVersion}"
+    sparkPackageName = "lightspeed-spark${sparkVersion}-${version}-s_${scalaBinaryVersion}"
     sparkDistName = "spark-${sparkVersion}-bin-hadoop2.7"
 
     scalaVersion = scalaBinaryVersion + '.10'
@@ -245,6 +245,8 @@ subprojects {
     // maxHeapSize '12g'
     // jvmArgs '-XX:+HeapDumpOnOutOfMemoryError','-XX:+UseConcMarkSweepGC', '-XX:MaxNewSize=2g',
     //        '-XX:+UseParNewGC', '-XX:+CMSClassUnloadingEnabled', '-Xss4m', '-XX:ReservedCodeCacheSize=1g'
+    //        '--add-opens', 'java.base/java.lang=ALL-UNNAMED',
+    //        '--add-opens', 'java.base/java.lang.invoke=ALL-UNNAMED'
     testLogging.exceptionFormat = TestExceptionFormat.FULL
     testLogging.events = TestLogEvent.values() as Set
 
@@ -418,7 +420,7 @@ subprojects {
             packaging 'jar'
             // optionally artifactId can be defined here
             description 'LightSpeed Spark optimizations to Apache Spark'
-            url 'http://www.lightspeed-spark.io'
+            url 'http://www.lightspeed.spark.io'
 
             scm {
               connection 'scm:git:https://github.com/sumwale/lightspeed-spark.git'
@@ -663,14 +665,14 @@ buildDeb {
 }
 
 distTar {
-  archiveName = 'lightspeed-spark_' + version + '_' + osFamilyName + '.tar.gz'
+  archiveName = 'lightspeed-spark' + sparkVersion + '_' + version + '_' + osFamilyName + '.tar.gz'
   dependsOn product
   compression = Compression.GZIP
   extension = 'tar.gz'
 }
 
 distZip {
-  archiveName = 'lightspeed-spark_' + version + '_' + osFamilyName + '.zip'
+  archiveName = 'lightspeed-spark' + sparkVersion + '_' + version + '_' + osFamilyName + '.zip'
   dependsOn product
 }
 
