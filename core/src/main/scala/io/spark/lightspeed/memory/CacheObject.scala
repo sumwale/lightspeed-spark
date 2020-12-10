@@ -31,7 +31,7 @@ import com.google.common.base.{FinalizableReferenceQueue, FinalizableWeakReferen
  *
  * @tparam T the type of contained object
  */
-sealed trait CacheObject[T] extends FinalizableWeakReference[T] {
+sealed trait CacheObject[T] {
 
   /**
    * A unique key for the object. This can possibly be this object itself.
@@ -55,17 +55,9 @@ sealed trait CacheObject[T] extends FinalizableWeakReference[T] {
   def compressionAlgorithm: String
 
   /**
-   * Returns true if this object is managed by [[EvictionManager]] or else created on-the-fly.
-   * For the latter case it is the caller's responsibility to [[finalizeReferent]] explicitly.
+   * Returns true if the contained object is being used (either by EvictionManager or otherwise).
    */
-  def isManaged: Boolean = managed
-
-  @volatile private[memory] var managed: Boolean = _
-
-  /**
-   * Used internally and should only be accessed/updated within synchronized block.
-   */
-  protected[this] var inUse: Int = _
+  def isInUse: Boolean
 
   /**
    * All users of this object should do so within this method or [[startWork]]/[[endWork]] so that
@@ -74,15 +66,7 @@ sealed trait CacheObject[T] extends FinalizableWeakReference[T] {
    * for some short amount of usage of the object while the [[startWork]]/[[endWork]] pair should
    * be used for longer durations or when usage is spread across multiple methods/modules.
    */
-  final def work[U](f: => U): U = synchronized {
-    inUse += 1
-    try {
-      f
-    } finally {
-      inUse -= 1
-      notifyAll()
-    }
-  }
+  def work[W](f: => W): W
 
   /**
    * Mark the object as being used to prevent it being [[release]]d. Normally callers should
@@ -92,25 +76,144 @@ sealed trait CacheObject[T] extends FinalizableWeakReference[T] {
    * for users to explicitly invoke [[endWork]] especially for off-heap memory because GC will
    * only collect in case of heap pressure.
    */
-  final def startWork(): Unit = synchronized(inUse += 1)
+  def startWork(): Unit
 
   /**
    * Un-mark the object as being in-use. This is a counter and should always follow [[startWork]].
    */
-  final def endWork(): Unit = synchronized {
+  def endWork(): Unit
+
+  /**
+   * Release this object from memory (and thus from the [[EvictionManager]]).
+   * Any further accesses to this object can result in undefined behaviour if
+   * this method returned true. Specifically accessing off-heap objects after this method
+   * has been invoked can lead to a JVM crash. Normally used by
+   * [[EvictionManager]] when an object is evicted but can be used by other users for "unmanaged"
+   * objects that failed in put into the [[EvictionManager]]. This will honour [[work]] and
+   * [[startWork]] methods on the object and wait for the method to end.
+   */
+  def release(waitForMillis: Long): Boolean
+}
+
+object CacheObject {
+  private[memory] lazy val finalizerQueue = new FinalizableReferenceQueue
+}
+
+final class PublicCacheObject[T, U](
+    override val key: Comparable[AnyRef],
+    val value: T,
+    override val memorySize: Long,
+    override val isCompressed: Boolean,
+    override val compressionAlgorithm: String,
+    private[memory] val otherObjectSize: Long,
+    private[memory] val toOtherObject: T => (U, Long),
+    private[memory] val fromOtherObject: U => (T, Long),
+    private[memory] val doFinalize: CacheObject[_] => Unit,
+    private[memory] val stored: Option[StoredCacheObject[_, _]] = None)
+    extends CacheObject[T] {
+
+  override def isInUse: Boolean = stored match {
+    case Some(o) => o.isInUse
+    case _ => false
+  }
+
+  override def work[W](f: => W): W = stored match {
+    case Some(o) => o.work(f)
+    case _ => f
+  }
+
+  override def startWork(): Unit = stored match {
+    case Some(o) => o.startWork()
+    case _ =>
+  }
+
+  override def endWork(): Unit = stored match {
+    case Some(o) => o.endWork()
+    case _ =>
+  }
+
+  override def release(waitForMillis: Long): Boolean = stored match {
+    case Some(o) => o.release(waitForMillis)
+    case _ => true
+  }
+
+  /**
+   * Convert this [[CacheObject]] in a form suitable for storage i.e. one of
+   * [[CompressedCacheObject]] or [[DecompressedCacheObject]]. This should only be used
+   * by [[EvictionManager]] to transform the [[EvictionManager.putObject]] to storage form.
+   */
+  private[memory] def toStoredObject: StoredCacheObject[T, U] = stored match {
+    case Some(o) => o.asInstanceOf[StoredCacheObject[T, U]]
+    case _ =>
+      if (isCompressed) {
+        new CompressedCacheObject[T, U](
+          key,
+          value,
+          memorySize,
+          compressionAlgorithm,
+          otherObjectSize,
+          toOtherObject,
+          fromOtherObject,
+          doFinalize)
+      } else {
+        new DecompressedCacheObject[T, U](
+          key,
+          value,
+          memorySize,
+          compressionAlgorithm,
+          otherObjectSize,
+          toOtherObject,
+          fromOtherObject,
+          doFinalize)
+      }
+  }
+}
+
+private[memory] abstract class StoredCacheObject[T, U](
+    override val key: Comparable[AnyRef],
+    _value: T,
+    override val memorySize: Long,
+    override val compressionAlgorithm: String,
+    /**
+     * Actions to `finalize` the contained object. This should be able to deal with both the
+     * compressed and decompressed versions of the object. In normal cases the finalization
+     * will deal with release of off-heap memory which should be identical for
+     * compressed/decompressed objects.
+     */
+    private[memory] val doFinalize: CacheObject[_] => Unit)
+    extends FinalizableWeakReference[T](_value, CacheObject.finalizerQueue)
+    with CacheObject[T] {
+
+  /**
+   * Size in bytes of the compressed version of this stored object.
+   */
+  def compressedSize: Long
+
+  /**
+   * Used internally and should only be accessed/updated within synchronized block.
+   */
+  @volatile private[this] var inUse: Int = _
+
+  override final def isInUse: Boolean = synchronized(inUse != 0)
+
+  override final def work[W](f: => W): W = synchronized {
+    inUse += 1
+    try {
+      f
+    } finally {
+      inUse -= 1
+      notifyAll()
+    }
+  }
+
+  override final def startWork(): Unit = synchronized(inUse += 1)
+
+  override final def endWork(): Unit = synchronized {
     inUse -= 1
     notifyAll()
   }
 
-  /**
-   * Release this object from memory (and thus from the EvictionManager).
-   * Any further accesses to this object can result in undefined behaviour after
-   * this method call. Specifically accessing off-heap objects after this method
-   * has been invoked can lead to a JVM crash. Normally used by
-   * [[EvictionManager]] when an object is evicted. This will honour [[work]] and [[startWork]]
-   * methods on the object and wait for the method to end.
-   */
-  private[memory] final def release(waitForMillis: Long): Boolean = synchronized {
+  override final def release(waitForMillis: Long): Boolean = synchronized {
     if (inUse > 0) {
       val loopMillis = if (waitForMillis > 10L) 10L else waitForMillis
       var remaining = waitForMillis
@@ -131,30 +234,14 @@ sealed trait CacheObject[T] extends FinalizableWeakReference[T] {
     } else false
   }
 
-  /**
-   * Actions to `finalize` the contained object. This should be able to deal with both the
-   * compressed and decompressed versions of the object. In normal cases the finalization will deal
-   * with release of off-heap memory which should be identical for compressed/decompressed objects.
-   */
-  protected val doFinalize: Any => Unit
+  override def finalizeReferent(): Unit = if (doFinalize ne null) doFinalize(this)
 
-  override def finalizeReferent(): Unit = doFinalize(get())
-
-  private[memory] def reset(): Unit = {
-    managed = false
+  private[memory] def reset(): Unit = synchronized {
     inUse = 0
     weightage = 0.0
-    nextInQueue = null
-    previousInQueue = null
+    // nextInQueue = null
+    // previousInQueue = null
   }
-
-  /**
-   * Get/Set the cost to transform from decompressed form to compressed and vice-versa.
-   * This should normally be filled in by the [[EvictionManager]] as an estimate going
-   * by past operations and can be a factor to determine whether the object should
-   * be retained or evicted from memory.
-   */
-  // private[memory] var transformationCost: Double = _
 
   /**
    * The overall `weightage` determined for this object used by [[EvictionManager]] to order the
@@ -165,16 +252,12 @@ sealed trait CacheObject[T] extends FinalizableWeakReference[T] {
   /**
    * Previous object in the queue maintained by [[EvictionManager]].
    */
-  private[memory] var previousInQueue: CacheObject[T] = _
+  // private[memory] var previousInQueue: CacheObject[T] = _
 
   /**
    * Next object in the queue maintained by [[EvictionManager]].
    */
-  private[memory] var nextInQueue: CacheObject[T] = _
-}
-
-object CacheObject {
-  private[memory] lazy val finalizerQueue = new FinalizableReferenceQueue
+  // private[memory] var nextInQueue: CacheObject[T] = _
 }
 
 /**
@@ -185,26 +268,27 @@ object CacheObject {
  * @tparam C the type of contained compressed object
  * @tparam D the type of decompressed object obtained after decompression
  */
-final class CompressedCacheObject[C, D](
-    override val key: Comparable[AnyRef],
+private[memory] final class CompressedCacheObject[C, D](
+    _key: Comparable[AnyRef],
     _value: C,
-    override val memorySize: Long,
-    override val compressionAlgorithm: String,
+    _memorySize: Long,
+    _compressionAlgorithm: String,
     val decompressedSizeEstimate: Long,
-    private val compressObject: D => C,
-    private val decompressObject: C => (D, Long),
-    override protected val doFinalize: Any => Unit)
-    extends FinalizableWeakReference[C](_value, CacheObject.finalizerQueue)
-    with CacheObject[C] {
+    private[memory] val decompressObject: C => (D, Long),
+    private[memory] val compressObject: D => (C, Long),
+    _doFinalize: CacheObject[_] => Unit)
+    extends StoredCacheObject[C, D](_key, _value, _memorySize, _compressionAlgorithm, _doFinalize) {
 
   override def isCompressed: Boolean = true
 
+  override def compressedSize: Long = memorySize
+
   /**
-   * Decompress the contained object and return a [[DecompressedCacheObject]]. Normally should
-   * be used by [[EvictionManager]].
+   * Decompress the given object (usually the contained object itself) and return a
+   * [[DecompressedCacheObject]]. Should only be used by [[EvictionManager]].
    */
-  private[memory] def decompress(): DecompressedCacheObject[D, C] = {
-    val (decompressedValue, decompressedSize) = decompressObject(get())
+  private[memory] def decompress(value: C): (DecompressedCacheObject[D, C], D) = {
+    val (decompressedValue, decompressedSize) = decompressObject(value)
     new DecompressedCacheObject[D, C](
       key,
       decompressedValue,
@@ -213,7 +297,7 @@ final class CompressedCacheObject[C, D](
       memorySize,
       compressObject,
       decompressObject,
-      doFinalize)
+      doFinalize) -> decompressedValue
   }
 }
 
@@ -226,34 +310,33 @@ final class CompressedCacheObject[C, D](
  * @tparam D the type of contained decompressed object
  * @tparam C the type of compressed object obtained after compression
  */
-final class DecompressedCacheObject[D, C](
-    override val key: Comparable[AnyRef],
+private[memory] final class DecompressedCacheObject[D, C](
+    _key: Comparable[AnyRef],
     _value: D,
-    override val memorySize: Long,
-    override val compressionAlgorithm: String,
-    val compressedSize: Long,
-    private val compressObject: D => C,
-    private val decompressObject: C => (D, Long),
-    override protected val doFinalize: Any => Unit)
-    extends FinalizableWeakReference[D](_value, CacheObject.finalizerQueue)
-    with CacheObject[D] {
+    _memorySize: Long,
+    _compressionAlgorithm: String,
+    override val compressedSize: Long,
+    private[memory] val compressObject: D => (C, Long),
+    private[memory] val decompressObject: C => (D, Long),
+    _doFinalize: CacheObject[_] => Unit)
+    extends StoredCacheObject[D, C](_key, _value, _memorySize, _compressionAlgorithm, _doFinalize) {
 
   override def isCompressed: Boolean = false
 
   /**
-   * Compress the contained object and return a [[CompressedCacheObject]]. Normally should
-   * be used by [[EvictionManager]].
+   * Compress the given object (usually the contained object itself) and return a
+   * [[CompressedCacheObject]]. Should only be used by [[EvictionManager]].
    */
-  private[memory] def compress(): CompressedCacheObject[C, D] = {
-    val compressedValue = compressObject(get())
+  private[memory] def compress(value: D): (CompressedCacheObject[C, D], C) = {
+    val (compressedValue, compressedSize) = compressObject(value)
     new CompressedCacheObject[C, D](
       key,
       compressedValue,
       compressedSize,
       compressionAlgorithm,
       memorySize,
-      compressObject,
       decompressObject,
-      doFinalize)
+      compressObject,
+      doFinalize) -> compressedValue
   }
 }

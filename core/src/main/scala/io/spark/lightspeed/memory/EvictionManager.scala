@@ -36,27 +36,24 @@ package io.spark.lightspeed.memory
 trait EvictionManager[C, D] {
 
   /**
-   * Set/reset the upper limit on the memory (heap or off-heap). If the current usage exceeds
-   * the given limit, then objects should be evicted from cache immediately as much required.
+   * Set/reset the upper limit on the memory (heap or off-heap) in bytes. If the current usage
+   * exceeds the given limit, then objects should be evicted from cache immediately as required.
    */
-  def setLimit(maxMemorySize: Long): Unit
+  def setLimit(newMaxMemory: Long): Unit
 
   /**
-   * Add a compressed object to the cache. Note that decompression will be taken care of
-   * transparently by the [[EvictionManager]] as per its own policy and should not be done
-   * by the caller (which should use the [[getDecompressed]] method instead).
+   * Add a compressed/decompressed object to the cache. Note that only the fields of the passed
+   * object are used and the `stored` field is expected to be None while others are expected to
+   * be non-null.
+   *
+   * @tparam T if the object is compressed then should be same as `C` else as `D`
+   * @tparam U if the object is compressed then should be same as `D` else as `C`
    */
-  def putCompressed(obj: CompressedCacheObject[C, D]): Boolean
+  def putObject[T, U](obj: PublicCacheObject[T, U]): Boolean
 
   /**
-   * Get the compressed version of the object for given key. The provided key object should
-   * be same as that that returned by resulting object's [[CacheObject.key]] for consistency.
+   * Get the decompressed version of the object with its wrapper for given key. The provided key
+   * object should be same as [[CacheObject.key]] of returned wrapper for consistency.
    */
-  def getCompressed(key: Comparable[AnyRef]): Option[CompressedCacheObject[C, D]]
-
-  /**
-   * Get the decompressed version of the object for given key. The provided key object should
-   * be same as that that returned by resulting object's [[CacheObject.key]] for consistency.
-   */
-  def getDecompressed(key: Comparable[AnyRef]): Option[DecompressedCacheObject[D, C]]
+  def getDecompressed(key: Comparable[AnyRef]): Option[PublicCacheObject[D, C]]
 }
