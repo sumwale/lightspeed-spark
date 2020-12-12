@@ -33,27 +33,54 @@ package io.spark.lightspeed.memory
  * @tparam C the type of compressed objects
  * @tparam D the type of decompressed objects
  */
-trait EvictionManager[C, D] {
+trait EvictionManager[C <: CacheValue, D <: CacheValue] {
 
   /**
    * Set/reset the upper limit on the memory (heap or off-heap) in bytes. If the current usage
    * exceeds the given limit, then objects should be evicted from cache immediately as required.
+   *
+   * @param newMaxMemory the new upper limit for the memory in bytes
+   * @param timestamp the current timestamp which should be the [[System.currentTimeMillis()]]
+   *                  at the start of operation
    */
-  def setLimit(newMaxMemory: Long): Unit
+  def setLimit(newMaxMemory: Long, timestamp: Long): Unit
 
   /**
    * Add a compressed/decompressed object to the cache. Note that only the fields of the passed
    * object are used and the `stored` field is expected to be None while others are expected to
    * be non-null.
    *
+   * @param obj the object to be put in the cache; note that it is converted to a
+   *            [[StoredCacheObject]] by [[EvictionManager]] for storage; all the fields
+   *            of the provided object are required to be valid/non-null except the `stored`
+   *            field which is for internal used and should always be [[None]] for this operation
+   * @param timestamp the current [[System.currentTimeMillis()]]; this has been provided
+   *                  as an argument with the expectation that a single common timestamp
+   *                  will be used for all objects that are part of a single operation so
+   *                  that there is no relative priority among objects of the same scan/insert
+   *
    * @tparam T if the object is compressed then should be same as `C` else as `D`
    * @tparam U if the object is compressed then should be same as `D` else as `C`
+   *
+   * @return true if the put succeeded and false if the put failed due to either no memory being
+   *         available or if the same [[PublicCacheObject.key]] is already present in the cache
    */
-  def putObject[T, U](obj: PublicCacheObject[T, U]): Boolean
+  def putObject[T <: CacheValue, U <: CacheValue](
+      obj: PublicCacheObject[T, U],
+      timestamp: Long): Boolean
 
   /**
    * Get the decompressed version of the object with its wrapper for given key. The provided key
    * object should be same as [[CacheObject.key]] of returned wrapper for consistency.
+   *
+   * @param key the key to lookup the object which should be the same as [[PublicCacheObject.key]]
+   *            field in the [[putObject]] operation
+   * @param timestamp the current [[System.currentTimeMillis()]]; this has been provided
+   *                  as an argument with the expectation that a single common timestamp
+   *                  will be used for all objects that are part of a single operation so
+   *                  that there is no relative priority among objects of the same scan/insert;
+   *                  this is used internally by [[EvictionManager]] for cases where the
+   *                  decompressed object is determined to better be cached
    */
-  def getDecompressed(key: Comparable[AnyRef]): Option[PublicCacheObject[D, C]]
+  def getDecompressed(key: Comparable[AnyRef], timestamp: Long): Option[PublicCacheObject[D, C]]
 }
