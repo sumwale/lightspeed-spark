@@ -81,6 +81,12 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    *                  that there is no relative priority among objects of the same scan/insert;
    *                  this is used internally by [[EvictionManager]] for cases where the
    *                  decompressed object is determined to better be cached
+   * @param loader in case the value is not found in the cache, then this can be optionally
+   *               provided to load the object and possibly put into cache before returning
    */
-  def getDecompressed(key: Comparable[AnyRef], timestamp: Long): Option[PublicCacheObject[D, C]]
+  def getDecompressed(
+      key: Comparable[AnyRef],
+      timestamp: Long,
+      loader: Option[Comparable[AnyRef] => PublicCacheObject[_ <: CacheValue, _ <: CacheValue]])
+    : Option[PublicCacheObject[D, C]]
 }

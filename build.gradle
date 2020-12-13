@@ -84,8 +84,8 @@ allprojects {
     options.forkOptions.jvmArgs = [ '-Xmx2g', '-Xms2g', '-XX:ReservedCodeCacheSize=512m', '-Djava.net.preferIPv4Stack=true' ]
     // scalaCompileOptions.optimize = true
     // scalaCompileOptions.useAnt = false
-    scalaCompileOptions.deprecation = false
-    scalaCompileOptions.additionalParameters = [ '-feature', '-explaintypes', '-Yno-adapted-args' ]
+    scalaCompileOptions.deprecation = true
+    scalaCompileOptions.additionalParameters = [ '-feature', '-deprecation', '-explaintypes', '-Yno-adapted-args' ]
   }
 
   javadoc.options.charSet = 'UTF-8'
