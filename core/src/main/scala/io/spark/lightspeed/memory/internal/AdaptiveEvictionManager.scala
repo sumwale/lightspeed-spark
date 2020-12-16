@@ -193,8 +193,9 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
   private def addCompressionSavingsToWeightage(
       currentMillisAdjusted: Double,
       compressed: CompressedCacheObject[_ <: CacheValue, _ <: CacheValue],
+      compressedSize: Long,
       decompressedSize: Long): Unit = {
-    val compressionSavingsFactor = (decompressedSize.toDouble / compressed.memorySize.toDouble) *
+    val compressionSavingsFactor = (decompressedSize.toDouble / compressedSize.toDouble) *
       (1.0 - decompressionToDiskReadCost)
     if (compressionSavingsFactor > 1.0) {
       compressed.compressionSavings = currentMillisAdjusted * compressionSavingsFactor
@@ -212,56 +213,65 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
     }
   }
 
-  override def putObject[T <: CacheValue, U <: CacheValue](
-      obj: PublicCacheObject[T, U],
+  override def putObject(
+      key: Comparable[AnyRef],
+      either: Either[C, D],
+      transformer: TransformValue[C, D],
       timestamp: Long): Boolean = {
-    cacheObject(obj, timestamp, throwOnLargeObject = true).isDefined
+    cacheObject(key, either, transformer, timestamp, throwOnLargeObject = true)
   }
 
-  private def cacheObject[T <: CacheValue, U <: CacheValue](
-      obj: PublicCacheObject[T, U],
+  private def cacheObject(
+      key: Comparable[AnyRef],
+      either: Either[C, D],
+      transformer: TransformValue[C, D],
       timestamp: Long,
-      throwOnLargeObject: Boolean): Option[StoredCacheObject[T]] = {
+      throwOnLargeObject: Boolean): Boolean = {
 
-    require(obj.key != null)
-    require(obj.value ne null)
-    require(obj.memorySize > 0L)
-    require(obj.compressionAlgorithm ne null)
-    require(obj.otherObjectSize > 0)
-    require(obj.toOtherObject ne null)
-    require(obj.fromOtherObject ne null)
-    require(obj.stored.isEmpty)
+    val value = either match {
+      case Left(v) => v
+      case Right(v) => v
+    }
+    val memorySize = value.memorySize
+    // basic requirements
+    require(either.isLeft || !value.isCompressed)
+    require(either.isRight || value.isCompressed)
+    require(memorySize > 0L)
+    require(transformer ne null)
+    require(transformer.compressionAlgorithm ne null)
+    // invariant to check for case when there are no compressed/decompressed versions of the object
+    require(transformer.compressionAlgorithm.isDefined || !value.isCompressed)
 
     maxMemoryLock.readLock().lock()
     try {
-      val objectSize = obj.memorySize
-      if (objectSize >= maxMemory) {
+      if (memorySize >= maxMemory) {
         if (throwOnLargeObject) {
           throw new IllegalArgumentException(
-            s"Cannot put object of $objectSize bytes with maxMemory = $maxMemory")
-        } else return None
+            s"Cannot put object of $memorySize bytes with maxMemory = $maxMemory")
+        } else return false
       }
-      val cached = obj.toStoredObject
+      val cached = StoredCacheObject(key, either, transformer)
       cached.weightage = millisTimeAdjusted(timestamp)
       // if this is a compressed object, then add the savings due to compression to weightage
-      if (obj.isCompressed) {
+      if (value.isCompressed) {
         addCompressionSavingsToWeightage(
           cached.weightage,
-          cached.asInstanceOf[CompressedCacheObject[T, U]],
-          obj.otherObjectSize)
+          cached.asInstanceOf[CompressedCacheObject[C, D]],
+          memorySize,
+          transformer.decompressedSize(either.asInstanceOf[Left[C, D]].value))
       }
       // quick check to determine if the object being inserted has a lower weightage than
       // the smallest one in the evictionMap
       if (evictionMap.firstKey().weightage < cached.weightage) {
-        cached.startWork() // value will be put in cache so mark as in-use
+        value.startWork() // value will be put in cache so mark as in-use
         // put into the cacheMap in any case, then update the evictionMap in runEviction either
         // synchronously, if the evictionLock can be acquired immediately or else asynchronously
         if (cacheMap.putIfAbsent(cached.key, cached) eq null) {
-          usedMemory.addAndGet(objectSize)
-          cacheAndEvict(() => evictionMap.put(cached, obj.value), timestamp)
-          Some(cached)
-        } else None
-      } else None
+          usedMemory.addAndGet(memorySize)
+          cacheAndEvict(() => evictionMap.put(cached, value), timestamp)
+          true
+        } else false
+      } else false
     } finally {
       maxMemoryLock.readLock().unlock()
     }
@@ -270,11 +280,11 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
   override def getDecompressed(
       key: Comparable[AnyRef],
       timestamp: Long,
-      loader: Option[Comparable[AnyRef] => PublicCacheObject[_ <: CacheValue, _ <: CacheValue]])
-    : Option[PublicCacheObject[D, C]] = {
+      loader: Option[Comparable[AnyRef] => Option[(Either[C, D], TransformValue[C, D])]])
+    : Option[D] = {
 
     val cached = cacheMap.get(key)
-    val cachedValue = if (cached ne null) cached.get() else null
+    val cachedValue = if (cached ne null) cached.value else null
     if (cachedValue ne null) cached match {
       case d: DecompressedCacheObject[D, C] =>
         // update weightage for access and need to remove+put into evictionMap to reorder
@@ -290,23 +300,11 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
         } finally {
           maxMemoryLock.readLock().unlock()
         }
-        Some(
-          PublicCacheObject[D, C](
-            d.key,
-            cachedValue.asInstanceOf[D],
-            d.memorySize,
-            d.isCompressed,
-            d.compressionAlgorithm,
-            d.compressedSize,
-            d.compressObject,
-            d.decompressObject,
-            d.doFinalize,
-            Some(d)))
+        Some(cachedValue.asInstanceOf[D])
 
       case c: CompressedCacheObject[C, D] =>
         val (d, dv) = c.decompress(cachedValue.asInstanceOf[C])
-        val decompressedSize = d.memorySize
-        var inCache = false
+        val decompressedSize = dv.memorySize
         // determine if decompressed object should be cached immediately
         d.weightage = c.weightage - c.compressionSavings
         d.weightage += millisTimeAdjusted(timestamp)
@@ -318,13 +316,14 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
           maxMemoryLock.readLock().lock()
           try {
             if (decompressedSize < maxMemory) {
-              d.startWork() // value will be put in cache so mark as in-use
-              val cc = cacheMap.put(key, d)
-              inCache = true
-              if (cc ne null) {
-                usedMemory.addAndGet(decompressedSize - cc.memorySize)
-                cc.endWork()
-                cc.release(0L)
+              dv.startWork() // value will be put in cache so mark as in-use
+              val cc = cacheMap.put(key, d).asInstanceOf[StoredCacheObject[CacheValue]]
+              val oldValue = if (cc ne null) cc.value else null
+              if (oldValue ne null) {
+                cc.clearValue()
+                usedMemory.addAndGet(decompressedSize - oldValue.memorySize)
+                oldValue.endWork()
+                oldValue.release(c.transformer, 0L)
               } else usedMemory.addAndGet(decompressedSize)
               cacheAndEvict(() => {
                 evictionMap.remove(cc)
@@ -335,46 +334,20 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
             maxMemoryLock.readLock().unlock()
           }
         }
-        Some(
-          PublicCacheObject[D, C](
-            d.key,
-            dv,
-            decompressedSize,
-            d.isCompressed,
-            d.compressionAlgorithm,
-            d.compressedSize,
-            d.compressObject,
-            d.decompressObject,
-            d.doFinalize,
-            if (inCache) Some(d) else None))
+        Some(dv)
     } else {
       loader match {
         case Some(l) =>
-          val loadedValue = l(key)
-          if (loadedValue ne null) {
-            val stored = cacheObject(loadedValue, timestamp, throwOnLargeObject = false)
-              .asInstanceOf[Option[StoredCacheObject[_ <: CacheValue]]]
-            // directly return the loaded object decompressing if required
-            if (loadedValue.isCompressed) {
-              val compressed = loadedValue.asInstanceOf[PublicCacheObject[C, D]]
-              val decompressed = compressed.toOtherObject(compressed.value)
-              Some(
-                PublicCacheObject[D, C](
-                  compressed.key,
-                  decompressed._1,
-                  decompressed._2,
-                  isCompressed = false,
-                  compressed.compressionAlgorithm,
-                  compressed.memorySize,
-                  compressed.fromOtherObject,
-                  compressed.toOtherObject,
-                  compressed.doFinalize,
-                  stored))
-            } else {
-              val decompressed = loadedValue.asInstanceOf[PublicCacheObject[D, C]]
-              Some(if (stored.isEmpty) decompressed else decompressed.copy(stored = stored))
-            }
-          } else None
+          l(key) match {
+            case Some((either, transformer)) =>
+              cacheObject(key, either, transformer, timestamp, throwOnLargeObject = false)
+              // directly return the loaded object decompressing if required
+              either match {
+                case Left(value) => Some(transformer.decompress(value))
+                case Right(value) => Some(value)
+              }
+            case _ => None
+          }
 
         case _ => None
       }
@@ -456,38 +429,44 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
           iter = evictionMap.keySet().iterator()
           remainingFlushes -= 1
         } else {
-          val removed = cacheMap.remove(removeKey)
+          val removed = cacheMap.remove(removeKey).asInstanceOf[StoredCacheObject[CacheValue]]
           // remove from evictionMap after cacheMap since it contains hard-reference to object
           // and so there is a minuscule chance that it gets GCed before removed.get() call
-          val removedVal = if (removed ne null) removed.get() else null
+          val removedVal = if (removed ne null) removed.value else null
           iter.remove()
-          if (removed ne null) {
-            var removedSize = removed.memorySize
+          if (removedVal ne null) {
+            var removedSize = removedVal.memorySize
+            val transformer =
+              removed.transformer.asInstanceOf[TransformValue[CacheValue, CacheValue]]
+            removed.clearValue()
             // for decompressed blocks, compress and put them back rather than evicting entirely
             // also check if the evictionMap contains compressed version which means that
             // getDecompressed already queued a task to push in decompressed object into the
             // evictionMap with higher weightage so skip this object and deal in next round
-            if ((removedVal ne null) && !removed.isCompressed && !candidate.isCompressed &&
-                (removed.compressedSize.toDouble / removed.memorySize.toDouble) <=
+            if (!removed.isCompressed && !candidate.isCompressed &&
+                transformer.compressionAlgorithm.isDefined &&
+                (transformer.compressedSize(removedVal).toDouble / removedSize.toDouble) <=
                   maxCompressionRatioToCache) {
-              val p @ (compressed, _) = removed
+              val p @ (compressed, compressedVal) = removed
                 .asInstanceOf[DecompressedCacheObject[D, C]]
                 .compress(removedVal.asInstanceOf[D])
-              if (removedSize > compressed.memorySize) {
+              val compressedSize = compressedVal.memorySize
+              if (removedSize > compressedSize) {
                 compressed.weightage = removed.weightage
                 addCompressionSavingsToWeightage(
                   millisTimeAdjusted(timestamp),
                   compressed,
+                  compressedSize,
                   removedSize)
-                compressed.startWork() // value will be put in cache so mark as in-use
+                compressedVal.startWork() // value will be put in cache so mark as in-use
                 if (cacheMap.putIfAbsent(compressed.key, compressed) eq null) {
                   pendingCompressedObjects.add(p)
-                  removedSize -= compressed.memorySize
+                  removedSize -= compressedSize
                 }
               }
             }
-            removed.endWork()
-            removed.release(0L)
+            removedVal.endWork()
+            removedVal.release(transformer, 0L)
             evicted += removedSize
             usedMemory.addAndGet(-removedSize)
           }

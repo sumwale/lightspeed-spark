@@ -24,11 +24,11 @@ package io.spark.lightspeed.memory
  * compressed objects allows keeping more objects in memory while incurring the overhead of
  * decompression so a balance has to be achieved between the two depending on available memory).
  * Implementations can apply various policies like LRU, LFU, FIFO or combinations.
- * Implementations usually should be indifferent to the type of memory used by the managed objects
- * (contained within [[CacheObject]]) that can be heap or off-heap. For latter case additional
- * modules can handle cases of real available RAM running low, in which case they can invoke
- * the `setLimit` method dynamically as required (and [[EvictionManager]]s are required to evict
- * immediately to honour).
+ * Implementations usually should be indifferent to the type of memory used by the managed
+ * [[CacheValue]] objects that can be heap or off-heap. For latter case additional modules
+ * can handle cases of real available RAM running low, in which case they can invoke the
+ * `setLimit` method dynamically as required (and [[EvictionManager]] is required to evict
+ * immediately to enforce the new limit synchronously blocking other operations as required).
  *
  * @tparam C the type of compressed objects
  * @tparam D the type of decompressed objects
@@ -50,43 +50,51 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    * object are used and the `stored` field is expected to be None while others are expected to
    * be non-null.
    *
-   * @param obj the object to be put in the cache; note that it is converted to a
-   *            [[StoredCacheObject]] by [[EvictionManager]] for storage; all the fields
-   *            of the provided object are required to be valid/non-null except the `stored`
-   *            field which is for internal used and should always be [[None]] for this operation
-   * @param timestamp the current [[System.currentTimeMillis()]]; this has been provided
+   * @param key A unique key for the object. This object cannot be same as the value itself or
+   *            contain a reference to value since this can be retained for long-term statistics.
+   * @param either The object to be put in the cache. Note that it is converted to a form
+   *               appropriate for storage by [[EvictionManager]]; all the fields of the provided
+   *               object are required to be valid/non-null; if the [[Either]] resolves to
+   *               [[Left]], then its [[CacheValue.isCompressed]] should be true else false.
+   * @param transformer Implementation to compress/decompress the provided `value` and `finalize`
+   *                    it for release. Typically this should have static implementations
+   *                    (e.g. per `compressionAlgorithm`) to minimize the objects held in cache.
+   * @param timestamp The current [[System.currentTimeMillis()]]. This has been provided
    *                  as an argument with the expectation that a single common timestamp
    *                  will be used for all objects that are part of a single operation so
-   *                  that there is no relative priority among objects of the same scan/insert
+   *                  that there is no relative priority among objects of the same scan/insert.
    *
-   * @tparam T if the object is compressed then should be same as `C` else as `D`
-   * @tparam U if the object is compressed then should be same as `D` else as `C`
-   *
-   * @return true if the put succeeded and false if the put failed due to either no memory being
-   *         available or if the same [[PublicCacheObject.key]] is already present in the cache
+   * @return True if the put succeeded and false if the put failed due to either no memory being
+   *         available or if the same `key` is already present in the cache.
    */
-  def putObject[T <: CacheValue, U <: CacheValue](
-      obj: PublicCacheObject[T, U],
+  def putObject(
+      key: Comparable[AnyRef],
+      either: Either[C, D],
+      transformer: TransformValue[C, D],
       timestamp: Long): Boolean
 
   /**
-   * Get the decompressed version of the object with its wrapper for given key. The provided key
-   * object should be same as [[CacheObject.key]] of returned wrapper for consistency.
+   * Get the decompressed version of the object for given key.
+   * If [[TransformValue.compressionAlgorithm]] is [[None]], then there is no compression for
+   * the [[CacheValue]] so the value as put in [[putObject]] or returned by `loader` is returned
+   * (and it is required that [[CacheValue.isCompressed]] is false for both).
    *
-   * @param key the key to lookup the object which should be the same as [[PublicCacheObject.key]]
-   *            field in the [[putObject]] operation
-   * @param timestamp the current [[System.currentTimeMillis()]]; this has been provided
+   * @param key The key to lookup the object which should be the same as the one provided in
+   *            the [[putObject]] operation.
+   * @param timestamp The current [[System.currentTimeMillis()]]. This has been provided
    *                  as an argument with the expectation that a single common timestamp
    *                  will be used for all objects that are part of a single operation so
    *                  that there is no relative priority among objects of the same scan/insert;
    *                  this is used internally by [[EvictionManager]] for cases where the
-   *                  decompressed object is determined to better be cached
-   * @param loader in case the value is not found in the cache, then this can be optionally
-   *               provided to load the object and possibly put into cache before returning
+   *                  decompressed object is cached transparently.
+   * @param loader In case the value is not found in cache, then this can be optionally provided
+   *               to load the object with its associated [[TransformValue]] and possibly put
+   *               into cache before returning. If the result resolves to [[Left]], then its
+   *               [[CacheValue.isCompressed]] should be true else false.
    */
   def getDecompressed(
       key: Comparable[AnyRef],
       timestamp: Long,
-      loader: Option[Comparable[AnyRef] => PublicCacheObject[_ <: CacheValue, _ <: CacheValue]])
-    : Option[PublicCacheObject[D, C]]
+      loader: Option[Comparable[AnyRef] => Option[(Either[C, D], TransformValue[C, D])]])
+    : Option[D]
 }
