@@ -17,6 +17,8 @@
 
 package io.spark.lightspeed.memory
 
+import java.lang.ref.Reference
+
 /**
  * The value object including a unique `key` for the object that is maintained in-memory (either
  * on-heap or off-heap depending on the implementation of this class) by [[EvictionManager]] and
@@ -35,10 +37,16 @@ package io.spark.lightspeed.memory
 trait CacheValue {
 
   /**
-   * Size in bytes occupied by the object in memory. The size for the key can be excluded if the
-   * object contains reference to the same key, or else the memory consumed by keys needs to be
-   * included or accounted separately ([[EvictionManager]] is not a memory manager per-se rather
-   * is intended as a helper for a manager that deals with accounting of heap/off-heap memory).
+   * Used internally and should only be accessed/updated within synchronized block.
+   */
+  protected[this] final var referenceCount: Int = _
+
+  /**
+   * Size in bytes occupied by the object in memory. The size for the `key` should be included
+   * in this even if that object is created on-the-fly since [[EvictionManager]] cache will retain
+   * a copy of the key. Alternatively the memory consumed by keys needs to be accounted separately
+   * beyond [[EvictionManager]]'s limit (which is not a memory manager per-se rather a helper for
+   * a full-fledged manager that deals with accounting of overall memory like Spark's UMM).
    */
   def memorySize: Long
 
@@ -57,88 +65,119 @@ trait CacheValue {
 
   /**
    * Returns true if [[finalizationInfo]] is useful and required by [[TransformValue.finalize]].
+   * If false, then [[TransformValue.finalize]] and [[free]] methods are skipped for the object.
    */
   def needsFinalization: Boolean
 
   /**
-   * Used internally and should only be accessed/updated within synchronized block.
+   * Any [[Reference]] to this object that needs to be cleared when this object is [[free]]'d.
+   * If [[needsFinalization]] is false then this will always be null.
    */
-  @volatile private[this] final var referenceCount: Int = _
+  private[memory] def finalizer: Reference[_ <: CacheValue]
+
+  /**
+   * Set a [[Reference]] to this object that needs to be cleared when this object is [[free]]'d.
+   * This is used by [[EvictionManager]] to help clear `WeakReference` of this object in its cache.
+   *
+   * @throws IllegalArgumentException if [[needsFinalization]] is false
+   */
+  private[memory] def finalizer_=(finalizer: Reference[_ <: CacheValue]): Unit
 
   /**
    * Returns true if the contained object is being used (by [[EvictionManager]] or otherwise)
-   * as indicated by [[work]] or [[startWork]] methods that alter the [[referenceCount]].
+   * as indicated by [[work]] or [[use]] methods that alter the [[referenceCount]].
    */
-  final def isInUse: Boolean = synchronized(referenceCount != 0)
+  final def isInUse: Boolean = synchronized(referenceCount > 0)
 
   /**
-   * All users of this object should work on this object within this method or using
-   * [[startWork]]+[[endWork]] so that the object is guaranteed to be valid throughout the duration
-   * of the method and it ensures [[EvictionManager]] will not [[release]] this object. This method
-   * should normally be used for some short amount of usage of the object while the
-   * [[startWork]]+[[endWork]] pair are intended to be used for longer durations or when usage is
-   * spread across multiple methods/modules.
+   * Mark the object as being used to prevent it being [[free]]'d by incrementing its
+   * [[referenceCount]]. Normally callers should ensure that the [[release]] is invoked in
+   * some finally block to always decrement the [[referenceCount]]. In the worst case the object
+   * will be released by GC using `WeakReference`s. Even though the `WeakReference` approach is
+   * much more efficient than `Object.finalize`, it is unpredictable and its preferable for users
+   * to explicitly invoke [[release]] especially for off-heap memory because GC will only collect
+   * in case of heap pressure (which can be small if off-heap is the primary storage).
+   *
+   * @throws IllegalStateException if the object was already [[free]]'d
    */
-  final def work[W](f: => W): W = synchronized {
-    referenceCount += 1
-    try {
-      f
-    } finally {
-      referenceCount -= 1
-      notifyAll()
+  final def use(): Unit = synchronized {
+    if (referenceCount >= 0) referenceCount += 1
+    else {
+      throw new IllegalStateException(
+        s"use(): invalid referenceCount=$referenceCount for $toString")
     }
   }
 
   /**
-   * Mark the object as being used to prevent it being [[release]]d. Normally callers should
-   * ensure that the [[endWork]] is invoked in some finally block to always free the object for
-   * [[release]]. In the worst case the object will be released by GC using `WeakReference`s.
-   * Even though the `WeakReference` approach is much more efficient than `Object.finalize`,
-   * it is unpredictable and its preferable for users to explicitly invoke [[endWork]] especially
-   * for off-heap memory because GC will only collect in case of heap pressure (which can be
-   * small if off-heap is the primary storage like Spark configured with off-heap).
+   * Like [[use]] but will return false instead of throwing [[IllegalStateException]] if the
+   * object was already [[free]]'d.
+   *
+   * @return true if the object was valid and [[referenceCount]] was incremented and false if
+   *         the object was already [[free]]'d
    */
-  final def startWork(): Unit = synchronized {
-    referenceCount += 1
-  }
-
-  /**
-   * Un-mark the object as being in-use. This should always be paired with [[startWork]] in a
-   * finally block else the [[EvictionManager]] will not be able to [[release]] the object even
-   * after being evicted (and will likely only be handled much later by GC).
-   */
-  final def endWork(): Unit = synchronized {
-    referenceCount -= 1
-    notifyAll()
-  }
-
-  /**
-   * Release this object from memory (and thus from the [[EvictionManager]] cache). Any further
-   * accesses to this object can result in undefined behaviour if this method returned true.
-   * Specifically accessing off-heap objects after this method has been invoked can lead to a JVM
-   * crash. Normally used by [[EvictionManager]] when an object is evicted but can be used by other
-   * users for "unmanaged" objects that failed in put into the [[EvictionManager]]. This will
-   * honor [[work]] and [[startWork]] methods on the object and wait for reference counters
-   * incremented by those methods to go down to zero.
-   */
-  final def release(transformer: TransformValue[_, _], waitMillis: Long): Boolean = synchronized {
-    if (referenceCount > 0) {
-      val loopMillis = if (waitMillis > 10L) 10L else waitMillis
-      var remaining = waitMillis
-      while (remaining > 0) {
-        try {
-          wait(loopMillis)
-          if (referenceCount == 0) remaining = 0 else remaining -= loopMillis
-        } catch {
-          case _: InterruptedException =>
-            remaining = 0
-            Thread.currentThread().interrupt()
-        }
-      }
-    }
-    if (referenceCount == 0) {
-      transformer.finalize(isCompressed, finalizationInfo)
+  final def tryUse(): Boolean = synchronized {
+    if (referenceCount >= 0) {
+      referenceCount += 1
       true
     } else false
   }
+
+  /**
+   * Decrement the [[referenceCount]] and [[free]] this object if there are no active references
+   * (and thus it is already gone from [[EvictionManager]] cache). Any further accesses to this
+   * object can result in undefined behaviour if this method returned true. Specifically accessing
+   * off-heap objects after this method returned true can lead to a JVM crash. Used by
+   * [[EvictionManager]] when an object is evicted and should be invoked by all other users
+   * that are using this object with [[use]] in a finally block.
+   *
+   * @return true if [[referenceCount]] went down to zero and object was [[free]]'d
+   *
+   * @throws IllegalStateException if the object was already [[free]]'d
+   */
+  final def release(): Boolean = synchronized {
+    if (referenceCount > 0) {
+      referenceCount -= 1
+      if (referenceCount == 0) {
+        if (needsFinalization) {
+          val ref = finalizer
+          if (ref ne null) {
+            ref.clear()
+            finalizer = null
+          }
+          free()
+        }
+        referenceCount = -1 // indicates that this object has been free()'d
+        true
+      } else false
+    } else {
+      throw new IllegalStateException(
+        s"release(): invalid referenceCount=$referenceCount for $toString")
+    }
+  }
+
+  /**
+   * All users of this object should work on this object within this method or using
+   * [[use]]+[[release]] so that the object is guaranteed to be valid throughout the duration
+   * of the method and it ensures that object has not been [[free]]'d while still in use. If the
+   * `work` to be done is spread across multiple methods/modules then the [[use]]+[[release]]
+   * pair should be used instead.
+   */
+  final def work[W](f: => W): W = {
+    use()
+    try {
+      f
+    } finally {
+      release()
+    }
+  }
+
+  /**
+   * Perform any finalization actions to be taken for this cached object. Any further accesses
+   * to this object can result in undefined behaviour if this method returned true. Specifically
+   * accessing off-heap objects after this method has been invoked can lead to a JVM crash.
+   *
+   * This should be identical to the [[TransformValue.finalize]] method for the [[TransformValue]]
+   * that was passed to [[EvictionManager.putObject]] or by loader in `getDecompressed`.
+   */
+  protected def free(): Unit
 }

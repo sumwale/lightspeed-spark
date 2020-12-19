@@ -25,7 +25,7 @@ import io.spark.lightspeed.memory._
  *
  * @tparam T the type of value contained in this object which is cleared on eviction
  */
-private[memory] sealed trait StoredCacheObject[T <: CacheValue] {
+sealed trait StoredCacheObject[T <: CacheValue] {
 
   /**
    * The overall `weightage` determined for this object used by [[EvictionManager]] to order the
@@ -67,8 +67,8 @@ private[memory] sealed trait StoredCacheObject[T <: CacheValue] {
   private[memory] final var generationalBoost: Double = _
 
   /**
-   * The key for the object which should be the one provided in [[EvictionManager.putObject]]
-   * and [[EvictionManager.getDecompressed]] methods.
+   * The key for the object which should be the same as that provided in [[EvictionManager]]'s
+   * methods like `putObject`, `getDecompressed` etc.
    */
   def key: Comparable[AnyRef]
 
@@ -83,7 +83,7 @@ private[memory] sealed trait StoredCacheObject[T <: CacheValue] {
    * Invoked by [[EvictionManager]] after this object has been evicted from cache after
    * which [[value]] can return null.
    */
-  private[memory] def clearValue(): Unit
+  def clearValue(): Unit
 
   /**
    * The [[TransformValue]] implementation for the [[value]] provided in
@@ -97,13 +97,6 @@ private[memory] sealed trait StoredCacheObject[T <: CacheValue] {
    * then this should be false.
    */
   def isCompressed: Boolean
-
-  override final def hashCode(): Int = key.hashCode()
-
-  override final def equals(obj: Any): Boolean = obj match {
-    case s: StoredCacheObject[_] => (s eq this) || s.key.equals(key)
-    case _ => obj.equals(key)
-  }
 }
 
 object StoredCacheObject {
@@ -112,13 +105,13 @@ object StoredCacheObject {
 
   /**
    * Create an appropriate [[StoredCacheObject]] for given [[CacheValue]] and [[TransformValue]].
-   * This should only be used by [[EvictionManager]] to transform the arguments to
+   * This should only be used by [[EvictionManager]] to transform the arguments of
    * [[EvictionManager.putObject]] for storage in the cache.
    */
-  private[memory] def apply[C <: CacheValue, D <: CacheValue](
+  def apply[C <: CacheValue, D <: CacheValue](
       key: Comparable[AnyRef],
       value: Either[C, D],
-      transformer: TransformValue[C, D]): StoredCacheObject[_ <: CacheValue] = value match {
+      transformer: TransformValue[C, D]): StoredCacheObject[_ >: C with D] = value match {
     case Left(value) =>
       if (value.needsFinalization) {
         new CompressedCacheObjectWithFinalization[C, D](
@@ -146,7 +139,7 @@ object StoredCacheObject {
  * @tparam C the type of contained compressed object
  * @tparam D the type of decompressed object obtained after decompression
  */
-private[memory] sealed trait CompressedCacheObject[C <: CacheValue, D <: CacheValue]
+sealed trait CompressedCacheObject[C <: CacheValue, D <: CacheValue]
     extends StoredCacheObject[C] {
 
   override final def isCompressed: Boolean = true
@@ -157,8 +150,9 @@ private[memory] sealed trait CompressedCacheObject[C <: CacheValue, D <: CacheVa
    * Decompress the given object (should be a hard reference to the contained object) and return
    * [[DecompressedCacheObject]] and contained object. Should only be used by [[EvictionManager]].
    */
-  private[memory] final def decompress(value: C): (DecompressedCacheObject[D, C], D) = {
-    val result = transformer.asInstanceOf[TransformValue[C, D]].decompress(value)
+  final def decompress(value: C): (DecompressedCacheObject[D, C], D) = {
+    val transformer = this.transformer.asInstanceOf[TransformValue[C, D]]
+    val result = transformer.decompress(value)
     if (result.needsFinalization) {
       new DecompressedCacheObjectWithFinalization[D, C](
         key,
@@ -179,7 +173,7 @@ private[memory] sealed trait CompressedCacheObject[C <: CacheValue, D <: CacheVa
  * @tparam D the type of contained decompressed object
  * @tparam C the type of compressed object obtained after compression
  */
-private[memory] sealed trait DecompressedCacheObject[D <: CacheValue, C <: CacheValue]
+sealed trait DecompressedCacheObject[D <: CacheValue, C <: CacheValue]
     extends StoredCacheObject[D] {
 
   override final def isCompressed: Boolean = false
@@ -188,8 +182,9 @@ private[memory] sealed trait DecompressedCacheObject[D <: CacheValue, C <: Cache
    * Compress the given object (should be a hard reference to the contained object) and return
    * [[CompressedCacheObject]] and contained object. Should only be used by [[EvictionManager]].
    */
-  private[memory] final def compress(value: D): (CompressedCacheObject[C, D], C) = {
-    val result = transformer.asInstanceOf[TransformValue[C, D]].compress(value)
+  final def compress(value: D): (CompressedCacheObject[C, D], C) = {
+    val transformer = this.transformer.asInstanceOf[TransformValue[C, D]]
+    val result = transformer.compress(value)
     if (result.needsFinalization) {
       new CompressedCacheObjectWithFinalization[C, D](
         key,
@@ -209,9 +204,9 @@ private[memory] sealed trait DecompressedCacheObject[D <: CacheValue, C <: Cache
  *
  * @tparam T the type of value contained in this object which is cleared on eviction
  */
-private[memory] sealed abstract class StoredCacheObjectWithoutFinalization[T <: CacheValue](
+sealed abstract class StoredCacheObjectWithoutFinalization[T <: CacheValue](
     override final val key: Comparable[AnyRef],
-    @volatile private[this] final var _value: T,
+    private[this] final var _value: T,
     override final val transformer: TransformValue[_ <: CacheValue, _ <: CacheValue])
     extends StoredCacheObject[T] {
 
@@ -228,7 +223,7 @@ private[memory] sealed abstract class StoredCacheObjectWithoutFinalization[T <: 
  * @tparam T the type of value contained in this object which is cleared on eviction or when
  *           the [[StoredCacheObject.finalizerQueue]] is processed once GC enqueues this object
  */
-private[memory] sealed abstract class StoredCacheObjectWithFinalization[T <: CacheValue](
+sealed abstract class StoredCacheObjectWithFinalization[T <: CacheValue](
     override final val key: Comparable[AnyRef],
     _value: T,
     override final val transformer: TransformValue[_ <: CacheValue, _ <: CacheValue],
@@ -238,9 +233,13 @@ private[memory] sealed abstract class StoredCacheObjectWithFinalization[T <: Cac
 
   override final def value: T = get()
 
-  override final def clearValue(): Unit = super.clear()
+  override final def clearValue(): Unit = {
+    // nothing to be done here; CacheValue.release or StoredCachedObject.finalizerQueue
+    // handler thread will clear the referent field
+  }
 
-  override def finalizeReferent(): Unit = transformer.finalize(isCompressed, finalizationInfo)
+  override def finalizeReferent(): Unit =
+    transformer.finalize(key, isCompressed, finalizationInfo)
 }
 
 /**
@@ -249,10 +248,10 @@ private[memory] sealed abstract class StoredCacheObjectWithFinalization[T <: Cac
  * @tparam C the type of contained compressed object
  * @tparam D the type of decompressed object obtained after decompression
  */
-private[memory] class CompressedCacheObjectWithoutFinalization[C <: CacheValue, D <: CacheValue](
+class CompressedCacheObjectWithoutFinalization[C <: CacheValue, D <: CacheValue](
     _key: Comparable[AnyRef],
     _value: C,
-    _transformer: TransformValue[_ <: CacheValue, _ <: CacheValue])
+    _transformer: TransformValue[C, D])
     extends StoredCacheObjectWithoutFinalization[C](_key, _value, _transformer)
     with CompressedCacheObject[C, D]
 
@@ -262,10 +261,10 @@ private[memory] class CompressedCacheObjectWithoutFinalization[C <: CacheValue, 
  * @tparam C the type of contained compressed object
  * @tparam D the type of decompressed object obtained after decompression
  */
-private[memory] class CompressedCacheObjectWithFinalization[C <: CacheValue, D <: CacheValue](
+class CompressedCacheObjectWithFinalization[C <: CacheValue, D <: CacheValue](
     _key: Comparable[AnyRef],
     _value: C,
-    _transformer: TransformValue[_ <: CacheValue, _ <: CacheValue],
+    _transformer: TransformValue[C, D],
     _finalizationInfo: Long)
     extends StoredCacheObjectWithFinalization[C](_key, _value, _transformer, _finalizationInfo)
     with CompressedCacheObject[C, D]
@@ -276,10 +275,10 @@ private[memory] class CompressedCacheObjectWithFinalization[C <: CacheValue, D <
  * @tparam D the type of contained decompressed object
  * @tparam C the type of compressed object obtained after compression
  */
-private[memory] class DecompressedCacheObjectWithoutFinalization[D <: CacheValue, C <: CacheValue](
+class DecompressedCacheObjectWithoutFinalization[D <: CacheValue, C <: CacheValue](
     _key: Comparable[AnyRef],
     _value: D,
-    _transformer: TransformValue[_ <: CacheValue, _ <: CacheValue])
+    _transformer: TransformValue[C, D])
     extends StoredCacheObjectWithoutFinalization[D](_key, _value, _transformer)
     with DecompressedCacheObject[D, C]
 
@@ -289,10 +288,10 @@ private[memory] class DecompressedCacheObjectWithoutFinalization[D <: CacheValue
  * @tparam D the type of contained decompressed object
  * @tparam C the type of compressed object obtained after compression
  */
-private[memory] class DecompressedCacheObjectWithFinalization[D <: CacheValue, C <: CacheValue](
+class DecompressedCacheObjectWithFinalization[D <: CacheValue, C <: CacheValue](
     _key: Comparable[AnyRef],
     _value: D,
-    _transformer: TransformValue[_ <: CacheValue, _ <: CacheValue],
+    _transformer: TransformValue[C, D],
     _finalizationInfo: Long)
     extends StoredCacheObjectWithFinalization[D](_key, _value, _transformer, _finalizationInfo)
     with DecompressedCacheObject[D, C]

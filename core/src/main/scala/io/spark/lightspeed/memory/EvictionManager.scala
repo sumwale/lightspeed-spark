@@ -46,9 +46,12 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
   def setLimit(newMaxMemory: Long, timestamp: Long): Unit
 
   /**
-   * Add a compressed/decompressed object to the cache. Note that only the fields of the passed
-   * object are used and the `stored` field is expected to be None while others are expected to
-   * be non-null.
+   * Add a compressed/decompressed object to the cache. Note that the fields of the passed object
+   * are are expected to be non-null and/or value.
+   *
+   * A successful put operation does not mean a whole lot in most cases because the object that
+   * was put could be evicted soon after by other puts/loads. Using a loader in [[getDecompressed]]
+   * should be preferred over explicit puts since it works transparently and is easier to use.
    *
    * @param key A unique key for the object. This object cannot be same as the value itself or
    *            contain a reference to value since this can be retained for long-term statistics.
@@ -64,8 +67,20 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    *                  will be used for all objects that are part of a single operation so
    *                  that there is no relative priority among objects of the same scan/insert.
    *
-   * @return True if the put succeeded and false if the put failed due to either no memory being
-   *         available or if the same `key` is already present in the cache.
+   * @return True if the put succeeded and false if the put failed due to lack of memory. A return
+   *         value of true may not be very useful since the entry can potentially be evicted soon
+   *         after due to other concurrent puts/loads. A return value of false, on the other hand,
+   *         is a definite indicator that the value was not cached.
+   *
+   * @throws IllegalArgumentException if [[TransformValue.compressionAlgorithm]] is None but
+   *                                  [[CacheValue.isCompressed]] is true
+   * @throws IllegalArgumentException if [[Either]] argument is [[Left]] but
+   *                                  [[CacheValue.isCompressed]] is false or it is true and the
+   *                                  argument is [[Right]]
+   * @throws IllegalArgumentException if `key` or `transformer` or the `transformer's`
+   *                                  `compressionAlgorithm` is null or value's `memorySize` is -ve
+   * @throws IllegalArgumentException if the given object's memorySize is greater than the
+   *                                  [[EvictionManager]]'s maximum limit itself
    */
   def putObject(
       key: Comparable[AnyRef],
@@ -77,7 +92,11 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    * Get the decompressed version of the object for given key.
    * If [[TransformValue.compressionAlgorithm]] is [[None]], then there is no compression for
    * the [[CacheValue]] so the value as put in [[putObject]] or returned by `loader` is returned
-   * (and it is required that [[CacheValue.isCompressed]] is false for both).
+   * (and it is required that [[CacheValue.isCompressed]] is false for both cases).
+   *
+   * The return value if found in cache or returned by loader, will have its reference count
+   * incremented (i.e. equivalent of [[CacheValue.use]]) so callers should do an explicit
+   * `release` when done with the object.
    *
    * @param key The key to lookup the object which should be the same as the one provided in
    *            the [[putObject]] operation.
@@ -91,10 +110,33 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    *               to load the object with its associated [[TransformValue]] and possibly put
    *               into cache before returning. If the result resolves to [[Left]], then its
    *               [[CacheValue.isCompressed]] should be true else false.
+   *
+   * @return The decompressed object from cache or loader, if present else [[None]]. In the former
+   *         case the object will have its reference count incremented.
    */
   def getDecompressed(
       key: Comparable[AnyRef],
       timestamp: Long,
       loader: Option[Comparable[AnyRef] => Option[(Either[C, D], TransformValue[C, D])]])
     : Option[D]
+
+  /**
+   * Remove the given key from cache and report if the operation was successful. This also removes
+   * any statistics recorded against the key so should be only used if the key is really gone.
+   *
+   * @param key The key to lookup the object which should be the same as the one provided in
+   *            the [[putObject]] operation.
+   *
+   * @return true if the key was present in cache and removed, and false otherwise
+   */
+  def removeObject(key: Comparable[AnyRef]): Boolean
+
+  /**
+   * For cases where any of the other methods had thrown unexpected errors like OutOfMemory
+   * the cache count and maps can potentially go out of sync. This method can be explicitly
+   * invoked to check and bring the cache into a consistent shape.
+   *
+   * @return True if the cache was consistent and false otherwise.
+   */
+  def checkAndForceConsistency(): Boolean
 }

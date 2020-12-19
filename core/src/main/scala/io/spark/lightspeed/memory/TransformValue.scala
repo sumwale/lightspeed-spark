@@ -61,9 +61,11 @@ trait TransformValue[C <: CacheValue, D <: CacheValue] {
   def decompressedSize(value: C): Long
 
   /**
-   * Any finalization actions to be taken for a cached object in `release`. This method should
+   * Any finalization actions to be taken for a cached object. This method should
    * be able to deal with both compressed and decompressed versions of the [[CacheValue]].
    * Typically this will release any off-heap memory used by the [[CacheValue]].
+   *
+   * This should be identical to the object's [[CacheValue.free]] method.
    */
-  def finalize(isCompressed: Boolean, finalizationInfo: Long): Unit
+  def finalize(key: Comparable[AnyRef], isCompressed: Boolean, finalizationInfo: Long): Unit
 }
