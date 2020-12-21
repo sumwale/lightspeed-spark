@@ -19,6 +19,8 @@ String scalaBinaryVersion = '2.12'
 String sparkVersion = '3.0.1'
 rootProject.name = 'lightspeed-spark_' + scalaBinaryVersion
 
+include ':lightspeed-common'
 include ':lightspeed-core_' + scalaBinaryVersion
 
+project(':lightspeed-common').projectDir = "$rootDir/common" as File
 project(':lightspeed-core_' + scalaBinaryVersion).projectDir = "$rootDir/core" as File

@@ -18,14 +18,11 @@
 package io.spark.lightspeed.memory
 
 /**
- * Interface to compress/decompress [[CacheValue]]s and `finalize` them for release. This is kept
- * as a separate interface from [[CacheValue]] since a reference to this can be held by
+ * Interface to compress/decompress [[CacheValue]]s and create [[FinalizeValue]] for release. This
+ * is kept as a separate interface from [[CacheValue]] since a reference to this can be held by
  * [[EvictionManager]] internally even after a [[CacheValue]] has been evicted. Implementations
  * should try not to create an object for every [[CacheValue]] rather should have static
  * implementations (e.g. per `compressionAlgorithm`) to minimize the objects held in cache.
- * However, if `finalize` requires more information beyond [[CacheValue.finalizationInfo]] and
- * other arguments provided, then this needs to be created for every [[CacheValue]] instance
- * to include that information.
  *
  * @tparam C the type of compressed objects
  * @tparam D the type of decompressed objects
@@ -61,11 +58,12 @@ trait TransformValue[C <: CacheValue, D <: CacheValue] {
   def decompressedSize(value: C): Long
 
   /**
-   * Any finalization actions to be taken for a cached object. This method should
-   * be able to deal with both compressed and decompressed versions of the [[CacheValue]].
-   * Typically this will release any off-heap memory used by the [[CacheValue]].
+   * Create a [[FinalizeValue]] instance for given object that will perform any finalization
+   * actions to be taken for a cached object. Typically this will release any off-heap memory
+   * used by the [[CacheValue]].
    *
-   * This should be identical to the object's [[CacheValue.free]] method.
+   * @return Optionally return [[FinalizeValue]] instance for the given [[CacheValue]]
+   *         or [[None]] if no finalization is required for the object
    */
-  def finalize(key: Comparable[AnyRef], isCompressed: Boolean, finalizationInfo: Long): Unit
+  def createFinalizer[T <: CacheValue](value: T): Option[FinalizeValue[T]]
 }

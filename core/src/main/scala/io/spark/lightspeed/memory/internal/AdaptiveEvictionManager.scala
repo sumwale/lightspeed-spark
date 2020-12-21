@@ -23,6 +23,7 @@ import java.util.concurrent.locks.{ReentrantLock, ReentrantReadWriteLock}
 import javax.annotation.concurrent.GuardedBy
 
 import io.spark.lightspeed.memory._
+import io.spark.lightspeed.util.Collections
 
 import org.apache.spark.internal.Logging
 
@@ -143,7 +144,6 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
    * The current value of the upper limit on memory in bytes allowed.
    * Should always be accessed within [[maxMemoryLock]].
    */
-  @GuardedBy("maxMemoryLock")
   private[this] var maxMemory: Long = maxMemorySize
 
   /**
@@ -202,13 +202,9 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
 
   /**
    * These are the entries thrown out of [[cacheMap]] and [[evictionMap]] by eviction but
-   * are retained for:
-   *
-   * 1) [[StoredCacheObjectWithFinalization]] objects as `WeakReference`s are required to
-   *    properly dispose off [[CacheValue]]s that have `needsFinalization` flag as true.
-   *
-   * 2) When evicted entries are "resurrected" by a future [[getDecompressed]] operation,
-   *    then the retained weightage is used for [[StoredCacheObject.generation]] handling.
+   * are retained for future statistics. When evicted entries are "resurrected" by a future
+   * [[putObject]] or [[getDecompressed]] operations, then the retained weightage is used for
+   * [[StoredCacheObject.generation]] handling.
    *
    * This map is only cleared when the count of entries exceeds the provided [[maxEvictedEntries]]
    * (the `LinkedHashMap` is used for the same purpose to purge oldest inserted entries first).
@@ -218,7 +214,7 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
    */
   @GuardedBy("evictionLock")
   private[this] val evictedEntries =
-    new java.util.LinkedHashMap[Comparable[AnyRef], StoredCacheObject[_ <: CacheValue]]()
+    Collections.newLinkedHashMap[Comparable[AnyRef], CacheValueStats]()
 
   /**
    * Map to hold pending caching work. Callers should ensure that [[usedMemory]] should not exceed
@@ -233,7 +229,7 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
    * items should acquire the read lock so that all of them can proceed concurrently, while
    * the eviction thread can acquire the write lock when draining the map. This is required
    * so that the eviction thread can finish its work and not keep iterating possibly
-   * indefinitely as new work items can keep being pushed continuously.
+   * indefinitely as new work items keep being pushed continuously.
    */
   private[this] val pendingWorkLock = new ReentrantReadWriteLock()
 
@@ -307,35 +303,39 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
       (1.0 - decompressionToDiskReadCost)) - 1.0
   }
 
-  private def release(value: CacheValue, cached: StoredCacheObject[_ <: CacheValue]): Unit = {
-    assert(value ne null)
+  @GuardedBy("evictionLock")
+  private def release(cached: StoredCacheObject[_ <: CacheValue]): Unit = {
+    val value = cached.value
     usedMemory.addAndGet(-value.memorySize)
-    value.release()
-    // moved to evictedEntries map
-    if (cached ne null) {
-      cached.clearValue()
-      evictedEntries.put(cached.key, cached)
-      purgeEvictedEntriesIfRequired()
+    if (!value.release()) {
+      addFinalizerIfMissing(value, cached)
     }
+    // move to evictedEntries map adjusting for existing compressed stats
+    evictedEntries.compute(
+      cached.key,
+      (_, v) => {
+        if (v == null || !v.isCompressed || cached.isCompressed) cached.toStats
+        else {
+          new CompressedCacheValueStats(
+            cached.weightage + v.compressionSavings,
+            cached.generation,
+            cached.generationalBoost,
+            v.compressionSavings)
+        }
+      })
+    purgeEvictedEntriesIfRequired()
   }
 
+  @GuardedBy("evictionLock")
   private def purgeEvictedEntriesIfRequired(): Boolean = {
     if (evictedEntries.size() > maxEvictedEntries) {
       val iter = evictedEntries.values().iterator()
       while (iter.hasNext) {
-        if (canPurge(iter.next())) {
-          iter.remove()
-          if (evictedEntries.size() <= maxEvictedEntries) return true
-        }
+        iter.remove()
+        if (evictedEntries.size() <= maxEvictedEntries) return true
       }
       true
     } else false
-  }
-
-  private def canPurge(cached: StoredCacheObject[_ <: CacheValue]): Boolean = cached match {
-    // cannot remove a valid WeakReference else finalizeReferent() can be skipped
-    case s: StoredCacheObjectWithFinalization[_] if s.get() ne null => false
-    case _ => true
   }
 
   override def setLimit(newMaxMemory: Long, timestamp: Long): Unit = {
@@ -399,21 +399,45 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
       // quick check to determine if the object being inserted has a lower weightage than
       // the smallest one in the evictionMap
       if (evictionMap.firstKey().weightage < cached.weightage) {
-        putStoredObject(key, value, cached.asInstanceOf[StoredCacheObject[CacheValue]], timestamp)
-      } else false
+        putStoredObject(key, cached.asInstanceOf[StoredCacheObject[CacheValue]], timestamp)
+      } else {
+        // set the finalizer field in any case even for cache miss for object cleanup
+        addFinalizerIfMissing(value, cached)
+        false
+      }
     } finally {
       maxMemoryLock.readLock().unlock()
     }
   }
 
+  /**
+   * Set the `finalizer` field of [[CacheValue]] if empty using [[TransformValue.createFinalizer]]
+   * and if created, put in [[EvictionService]]'s map to maintain the `WeakReference`.
+   */
+  private def addFinalizerIfMissing(
+      value: CacheValue,
+      storedObject: StoredCacheObject[_ <: CacheValue]): Unit = {
+    if (value.finalizer eq null) {
+      storedObject.transformer.createFinalizer(value) match {
+        case Some(f) =>
+          value.finalizer = f
+          // maintain in a separate map for pending WeakReferences that will be cleared when the
+          // underlying CacheValue is finalized
+          val finalizer = value.finalizer
+          if (finalizer ne null) EvictionService.addWeakReference(finalizer)
+        case _ =>
+      }
+    }
+  }
+
   private def putStoredObject[T <: CacheValue](
       key: Comparable[AnyRef],
-      value: T,
       storeObject: StoredCacheObject[T],
       timestamp: Long): Boolean = {
-    value.use() // value will be put in cache so mark as in-use
+    val value = storeObject.value
+    value.use() // value can be put in cache so mark as in-use
     usedMemory.addAndGet(value.memorySize)
-    val pendingEntry = new CachedPending[T](value, storeObject, timestamp)
+    val pendingEntry = new CachedPending[T](storeObject, timestamp)
     cacheAndEvict(key, pendingEntry)
     pendingEntry.cached // returns valid value if cacheAndEvict was run synchronously
   }
@@ -425,15 +449,12 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
     : Option[D] = {
 
     var cached = cacheMap.get(key)
-    var cachedValue: CacheValue = if (cached ne null) cached.value else null
-    if (cachedValue eq null) {
+    if (cached eq null) {
       // lookup in the pending cache
       val pendingEntry = pendingWorkItems.get(key)
-      if (pendingEntry ne null) {
-        cached = pendingEntry.storeObject
-        if (cached ne null) cachedValue = cached.value
-      }
+      if (pendingEntry ne null) cached = pendingEntry.storeObject
     }
+    var cachedValue: CacheValue = if (cached ne null) cached.value else null
     // increment reference count for the value that can be returned with tryUse()
     // since it is possible in the worst case that the object was just evicted and released
     if ((cachedValue ne null) && !cachedValue.tryUse()) {
@@ -451,23 +472,35 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
         Some(cachedValue.asInstanceOf[D])
 
       case c: CompressedCacheObject[C, D] =>
-        val (d, dv) = c.decompress(cachedValue.asInstanceOf[C])
-        cachedValue.release() // release the extra reference count added by tryUse() before
+        val d = try {
+          c.decompress(cachedValue.asInstanceOf[C])
+        } finally {
+          cachedValue.release() // release the extra reference count added by tryUse() before
+        }
+        val dv = d.value
         val dvSize = dv.memorySize
+        var putInvoked = false
         // determine if decompressed object should be cached immediately
-        val cw = c.weightage
-        d.weightage = cw - c.compressionSavings + millisTimeAdjusted(timestamp)
+        val compressedWeight = c.weightage
+        d.weightage = compressedWeight - c.compressionSavings + millisTimeAdjusted(timestamp)
         // quick check to determine if the object being inserted has a lower weightage than
         // the smallest one in the evictionMap; in the worst case this can still end up
         // putting decompressed object in cache while runEviction can remove it or
         // change to compressed form again
-        if (d.weightage >= cw || evictionMap.firstKey().weightage < d.weightage) {
+        if (d.weightage >= compressedWeight || evictionMap.firstKey().weightage < d.weightage) {
           maxMemoryLock.readLock().lockInterruptibly()
           try {
-            if (dvSize < maxMemory) putStoredObject(key, dv, d, timestamp)
+            if (dvSize < maxMemory) {
+              putStoredObject(key, d, timestamp)
+              putInvoked = true
+            }
           } finally {
             maxMemoryLock.readLock().unlock()
           }
+        }
+        if (!putInvoked) {
+          // set the finalizer field in any case even for cache miss for object cleanup
+          addFinalizerIfMissing(dv, d)
         }
         dv.use()
         Some(dv)
@@ -503,7 +536,7 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
   }
 
   override def removeObject(key: Comparable[AnyRef]): Boolean = {
-    val removeCached = new RemoveCached[CacheValue](key, System.currentTimeMillis())
+    val removeCached = new RemoveObject[CacheValue](key, System.currentTimeMillis())
     runEviction(blocking = true, removeCached, removeCached.timestamp)
     removeCached.removed
   }
@@ -643,7 +676,7 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
     else if (!evictionLock.tryLock()) {
       return Long.MinValue // indicates that runEviction was skipped
     }
-    val pendingCompressedObjects = new java.util.ArrayList[(CompressedCacheObject[C, D], C)]()
+    val pendingCompressedObjects = new java.util.ArrayList[CompressedCacheObject[C, D]]()
     var remainingFlushes = maxFlushPending
     val max = maxMemory
 
@@ -672,33 +705,37 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
           assert(cacheMap.remove(removeKey) eq candidate)
           iter.remove()
           var removedSize = removedVal.memorySize
-          val currentMillisAdjusted = millisTimeAdjusted(timestamp)
-          val transformer =
-            candidate.transformer.asInstanceOf[TransformValue[CacheValue, CacheValue]]
-          // for decompressed blocks, compress and put them back rather than evicting entirely
-          if (!candidate.isCompressed && transformer.compressionAlgorithm.isDefined &&
-              evictionMap.firstKey().weightage < (candidate.weightage + currentMillisAdjusted *
-                calcCompressionSavingsFactor(
-                  transformer.compressedSize(removedVal),
-                  removedSize))) {
-            val p @ (compressed, compressedVal) = candidate
-              .asInstanceOf[DecompressedCacheObject[D, C]]
-              .compress(removedVal.asInstanceOf[D])
-            val compressedSize = compressedVal.memorySize
-            compressed.weightage = candidate.weightage
-            addCompressionSavingsToWeightage(
-              currentMillisAdjusted,
-              compressed,
-              compressedSize,
-              removedSize)
-            compressedVal.use() // value can be put in cache so mark as in-use
-            if (compressed.weightage > candidate.weightage) {
-              usedMemory.addAndGet(compressedSize)
-              pendingCompressedObjects.add(p)
-              removedSize -= compressedSize
-            } else compressedVal.release()
+          try {
+            val currentMillisAdjusted = millisTimeAdjusted(timestamp)
+            val transformer =
+              candidate.transformer.asInstanceOf[TransformValue[CacheValue, CacheValue]]
+            // for decompressed blocks, compress and put them back rather than evicting entirely
+            if (!candidate.isCompressed && transformer.compressionAlgorithm.isDefined &&
+                evictionMap.firstKey().weightage < (candidate.weightage + currentMillisAdjusted *
+                  calcCompressionSavingsFactor(
+                    transformer.compressedSize(removedVal),
+                    removedSize))) {
+              val compressed = candidate
+                .asInstanceOf[DecompressedCacheObject[D, C]]
+                .compress(removedVal.asInstanceOf[D])
+              val compressedVal = compressed.value
+              val compressedSize = compressedVal.memorySize
+              compressed.weightage = candidate.weightage
+              addCompressionSavingsToWeightage(
+                currentMillisAdjusted,
+                compressed,
+                compressedSize,
+                removedSize)
+              compressedVal.use() // value can be put in cache so mark as in-use
+              if (compressed.weightage > candidate.weightage) {
+                usedMemory.addAndGet(compressedSize)
+                pendingCompressedObjects.add(compressed)
+                removedSize -= compressedSize
+              } else compressedVal.release()
+            }
+          } finally {
+            release(candidate)
           }
-          release(removedVal, candidate)
           evicted += removedSize
           // break the loop if usedMemory has fallen below maxMemory
           if (max >= usedMemory.get()) return evicted
@@ -744,16 +781,30 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
     t.getMessage.contains("Direct buffer") // direct buffer allocation failures are non-fatal
   } */
 
-  private def putIntoCache[T <: CacheValue](storeObject: StoredCacheObject[T], value: T): Unit = {
-    val oldCached = cacheMap.put(storeObject.key, storeObject)
-    if (oldCached ne null) release(evictionMap.remove(oldCached), oldCached)
-    storeObject match {
-      case ref: StoredCacheObjectWithFinalization[T] => value.finalizer = ref
-      case _ =>
+  @GuardedBy("evictionLock")
+  private def putIntoCache[T <: CacheValue](
+      storeObject: StoredCacheObject[T],
+      checkEvicted: Boolean): Unit = {
+    val key = storeObject.key
+    val oldCached = cacheMap.put(key, storeObject)
+    if (oldCached ne null) {
+      assert(evictionMap.remove(oldCached) eq oldCached.value)
+      release(oldCached)
+    } else if (checkEvicted) {
+      val evicted = evictedEntries.remove(key)
+      if (evicted ne null) {
+        // evicted object being resurrected so the generation will increase
+        storeObject.weightage += evicted.weightage
+        storeObject.generation = evicted.generation + 1
+        if (!storeObject.isCompressed && evicted.isCompressed) {
+          storeObject.weightage -= evicted.compressionSavings
+        }
+      }
     }
-    assert(evictionMap.putIfAbsent(storeObject, value) eq null)
+    assert(evictionMap.putIfAbsent(storeObject, storeObject.value) eq null)
   }
 
+  @GuardedBy("evictionLock")
   private def flushPendingWork(blocking: Boolean): Boolean = {
     // avoid locking the queue for entire duration since each work item in the queue can be
     // expensive, so block only when beyond a count or explicit flag has been passed
@@ -767,9 +818,10 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
       val iter = pendingWorkItems.entrySet().iterator()
       while (iter.hasNext) {
         val entry = iter.next()
+        val key = entry.getKey
         val value = entry.getValue
         runIgnoreException(value)
-        pendingWorkItems.remove(entry.getKey, value)
+        pendingWorkItems.remove(key, value)
         numItems += 1
         if (numItems >= 20) { // blocking run
           pendingWorkLock.writeLock().lockInterruptibly()
@@ -792,15 +844,16 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
     pendingWorkItems.clear()
   }
 
+  @GuardedBy("evictionLock")
   private def flushPendingCompressedObjects(
-      objects: java.util.ArrayList[(CompressedCacheObject[C, D], C)]): Boolean = {
+      objects: java.util.ArrayList[CompressedCacheObject[C, D]]): Boolean = {
     val numObjects = objects.size()
     if (numObjects != 0) {
       var i = 0
       while (i < numObjects) {
         val p = objects.get(i)
         i += 1
-        runIgnoreException(() => putIntoCache(p._1, p._2))
+        runIgnoreException(() => putIntoCache(p, checkEvicted = false))
       }
       objects.clear()
       true
@@ -813,7 +866,6 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
   }
 
   private final class CachedPending[T <: CacheValue](
-      value: T,
       override val storeObject: StoredCacheObject[T],
       override val timestamp: Long)
       extends PendingEntry[T] {
@@ -823,13 +875,14 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
 
     def cached: Boolean = _cached
 
+    @GuardedBy("evictionLock")
     override def run(): Unit = {
       // only cache if the weightage is at least more than the entry with smallest weightage
       if (evictionMap.firstKey().weightage < storeObject.weightage) {
-        putIntoCache(storeObject, value)
+        putIntoCache(storeObject, checkEvicted = true)
         _cached = true
       } else {
-        release(value, storeObject)
+        release(storeObject)
         _cached = false
       }
     }
@@ -840,6 +893,7 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
       override val timestamp: Long)
       extends PendingEntry[T] {
 
+    @GuardedBy("evictionLock")
     override def run(): Unit = {
       val value = evictionMap.remove(storeObject)
       if (value ne null) {
@@ -849,7 +903,7 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
     }
   }
 
-  private final class RemoveCached[T <: CacheValue](
+  private final class RemoveObject[T <: CacheValue](
       key: Comparable[AnyRef],
       override val timestamp: Long)
       extends PendingEntry[T] {
@@ -860,15 +914,17 @@ final class AdaptiveEvictionManager[C <: CacheValue, D <: CacheValue](
 
     override def storeObject: StoredCacheObject[T] = null // indicates that key is to be removed
 
+    @GuardedBy("evictionLock")
     override def run(): Unit = {
       val cached = cacheMap.remove(key)
       if (cached ne null) {
-        release(evictionMap.remove(cached), cached)
+        assert(evictionMap.remove(cached) eq cached.value)
+        release(cached)
         _removed = true
       } else {
         _removed = false
       }
-      evictedEntries.computeIfPresent(key, (_, v) => if (canPurge(v)) null else v)
+      evictedEntries.remove(key)
     }
   }
 }
