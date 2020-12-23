@@ -45,7 +45,7 @@ shadowJar {
   classifier = null
 
   // relocate fastutil to avoid potential conflicts
-  relocate 'it.unimi.dsi.fastutil', 'io.spark.lightspeed.it.unimi.dsi.fastutil'
+  relocate 'it.unimi.dsi.fastutil', 'com.github.spark.lightspeed.it.unimi.dsi.fastutil'
 
   minimize()
 }
