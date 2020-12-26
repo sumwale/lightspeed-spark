@@ -26,6 +26,26 @@ import scala.reflect.ClassTag
 
 import org.apache.spark.internal.Logging
 
+/**
+ * A simple segmented implementation of a concurrent hash map. The overall hash map is divided
+ * into a fixed number of segments (a power of 2) depending on desired concurrency level. Each
+ * segment is simply a normal HashMap implementation which is protected by a read-write lock.
+ *
+ * Iterators have a slight complication with respect to the duration of locks which can otherwise
+ * be indefinite, so each segment is copied to an array in the segment read lock by the iterator.
+ * To avoid this copy overhead, the [[foreach]] method is overridden to hold the segment read locks
+ * for the entire duration of the operation on a segment so this is supposed to be used for short
+ * duration operations only else update operations can be blocked for a long time.
+ *
+ * @param initialCapacity hint for minimum number of elements in the map
+ * @param loadFactor the load factor of the hash map
+ * @param concurrencyLevel expected number of concurrent threads that can update the map
+ * @param mapImpl a closure taking the `initialCapacity` and `loadFactor` arguments and returning
+ *                the actual [[java.util.Map]] implementation to use
+ *
+ * @tparam K type of keys in the map
+ * @tparam V type of values in the map
+ */
 final class ConcurrentSegmentedMap[K: ClassTag, V: ClassTag](
     initialCapacity: Int,
     loadFactor: Float,
@@ -95,7 +115,7 @@ final class ConcurrentSegmentedMap[K: ClassTag, V: ClassTag](
     }
   }
 
-  // contains and apply overridden to avoid option allocations.
+  // contains and apply overridden to avoid scala.Option allocations
   override def contains(key: K): Boolean = find(key) != null
 
   override def apply(key: K): V = {

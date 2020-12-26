@@ -18,9 +18,9 @@
 package com.github.spark.lightspeed.memory
 
 /**
- * Interface to compress/decompress [[CacheValue]]s and create [[FinalizeValue]] for release. This
- * is kept as a separate interface from [[CacheValue]] since a reference to this can be held by
- * [[EvictionManager]] internally even after a [[CacheValue]] has been evicted. Implementations
+ * Interface to compress/decompress [[CacheValue]]s and create [[FinalizeValue]] for their release.
+ * This is kept as a separate interface from [[CacheValue]] so it can be a completely separate
+ * object or can be implemented by [[CacheValue]] itself. For former case, implementations
  * should try not to create an object for every [[CacheValue]] rather should have static
  * implementations (e.g. per `compressionAlgorithm`) to minimize the objects held in cache.
  *
@@ -60,7 +60,7 @@ trait TransformValue[C <: CacheValue, D <: CacheValue] {
   /**
    * Create a [[FinalizeValue]] instance for given object that will perform any finalization
    * actions to be taken for a cached object. Typically this will release any off-heap memory
-   * used by the [[CacheValue]].
+   * used by the [[CacheValue]] and/or perform bookkeeping in memory managers like that of Spark.
    *
    * @return Optionally return [[FinalizeValue]] instance for the given [[CacheValue]]
    *         or [[None]] if no finalization is required for the object

@@ -23,7 +23,7 @@ import com.sun.jna.LastErrorException;
 import com.sun.jna.Platform;
 
 /**
- * Some common methods having no equivalent in Java/Scala requiring JNA calls.
+ * Some common native OS-level methods having no equivalent in Java/Scala using JNA calls.
  */
 public interface OperatingSystem {
 
@@ -38,6 +38,10 @@ public interface OperatingSystem {
    */
   void setCurrentWorkingDirectory(String dir) throws LastErrorException;
 
+  /**
+   * Get an instance of {@link OperatingSystem} implementation for the current platform.
+   * Currently only POSIX compatible platforms and Windows is supported.
+   */
   static OperatingSystem getInstance() {
     return Platform.isWindows() ? WindowsOperatingSystem.getInstance()
         : PosixOperatingSystem.getInstance();

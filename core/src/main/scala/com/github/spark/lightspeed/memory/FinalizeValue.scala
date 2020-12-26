@@ -17,32 +17,37 @@
 
 package com.github.spark.lightspeed.memory
 
+import com.github.spark.lightspeed.memory.internal.Utils
 import com.google.common.base.FinalizableWeakReference
 
 /**
  * Base class for finalization of [[CacheValue]] that users must implement for objects that
  * need additional cleanup after eviction (e.g. freeing memory for off-heap objects).
- * The same must be returned by the [[TransformValue.createFinalizer]] method given an object.
+ * The implementation must be returned by [[TransformValue.createFinalizer]] given the object.
  *
- * Note: Implementations should normally not require to override the [[clear]] method but if they
- * do, then it must invoke `super.clear()` in the overridden method unless the implementation
- * provides its own way of invoking [[EvictionService.removeWeakReference]].
+ * Note: Implementations cannot override the [[clear]] method and rather should override
+ * [[basicClear]] for any additional cleanup actions (which should also call `super.basicClear`).
+ * The invocation of [[basicClear]] is ensured to be done exactly once.
  */
 abstract class FinalizeValue[T <: CacheValue](value: T)
     extends FinalizableWeakReference[T](value, EvictionService.finalizerQueue) {
 
-  /**
-   * Base class clear of the contained referent. Provided as a convenience if an implementation
-   * intends to override [[clear]] method without invoking `super.clear()` (in which case it
-   * should have its own way of invoking [[EvictionService.removeWeakReference]]).
-   */
-  final def baseClear(): Unit = super.clear()
+  @volatile protected[this] final var invoked: Int = 0
 
-  override def clear(): Unit = {
-    val value = super.get()
-    if (value ne null) {
+  /**
+   * Actions required to `clear` this `WeakReference` apart from removing from the
+   * [[EvictionService]]'s `WeakReference` map. This can be invoked independently if
+   * it is known that this finalizer has not been added to [[EvictionService]]'s map.
+   *
+   * Implementations should override this method to add any actions required in `clear`
+   * just prior to [[finalizeReferent]] such as accounting in Spark's MemoryManager.
+   */
+  def basicClear(): Unit = super.clear()
+
+  override final def clear(): Unit = {
+    if (Utils.compareAndSetInvoked(this, 0, 1)) {
       EvictionService.removeWeakReference(this)
+      basicClear()
     }
-    baseClear()
   }
 }

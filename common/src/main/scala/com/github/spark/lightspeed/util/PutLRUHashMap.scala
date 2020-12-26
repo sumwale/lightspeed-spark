@@ -15,33 +15,20 @@
  * limitations under the License.
  */
 
-package com.github.spark.lightspeed.util;
+package com.github.spark.lightspeed.util
 
-import java.util.Map;
-import java.util.Set;
+import it.unimi.dsi.fastutil.Hash
+import it.unimi.dsi.fastutil.objects.Object2ObjectLinkedOpenHashMap
 
-import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
+/**
+ * Extension to [[Object2ObjectLinkedOpenHashMap]] to ensure that put operation
+ * moves the entry to the end of list in the case of overwrite too so follows LRU
+ * order in terms of puts.
+ */
+final class PutLRUHashMap[K, V](initialCapacity: Int, loadFactor: Float)
+    extends Object2ObjectLinkedOpenHashMap[K, V](initialCapacity, loadFactor) {
 
-@SuppressWarnings("unused")
-public class Collections {
+  def this() = this(Hash.DEFAULT_INITIAL_SIZE, Hash.DEFAULT_LOAD_FACTOR)
 
-  // cannot instantiate
-  private Collections() {
-  }
-
-  public static <K> Set<K> newHashSet() {
-    return new ObjectOpenHashSet<>();
-  }
-
-  public static <K> Set<K> newHashSet(int initialCapacity, float loadFactor) {
-    return new ObjectOpenHashSet<>(initialCapacity, loadFactor);
-  }
-
-  public static <K, V> Map<K, V> newLinkedHashMap() {
-    return new LinkedOpenHashMap<>();
-  }
-
-  public static <K, V> Map<K, V> newLinkedHashMap(int initialCapacity, float loadFactor) {
-    return new LinkedOpenHashMap<>(initialCapacity, loadFactor);
-  }
+  override def put(k: K, v: V): V = putAndMoveToLast(k, v)
 }

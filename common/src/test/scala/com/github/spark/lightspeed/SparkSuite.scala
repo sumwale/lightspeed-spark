@@ -25,6 +25,11 @@ import org.scalatest.Tag
 
 import org.apache.spark.SparkFunSuite
 
+/**
+ * Extends [[SparkFunSuite]] to set a process-specific current working directory to avoid temporary
+ * file clutter. Also adds a [[benchmark]] method much like `test` but which is run only when
+ * `benchmarks.enable=true` system property is set.
+ */
 abstract class SparkSuite extends SparkFunSuite {
 
   assert(SparkSuite.processWorkingDir.nonEmpty)

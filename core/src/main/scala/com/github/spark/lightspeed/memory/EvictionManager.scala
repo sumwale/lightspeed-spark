@@ -18,10 +18,10 @@
 package com.github.spark.lightspeed.memory
 
 /**
- * Interface for a generic manager for in-memory objects that need to be evicted when running low
+ * Interface for a generic manager of in-memory objects that need to be evicted when running low
  * on memory. Two kinds of objects namely compressed and decompressed should be supported by
  * implementations which should balance between the two as per the determined `cost` (e.g.
- * compressed objects allows keeping more objects in memory while incurring the overhead of
+ * compression of objects allows keeping more objects in memory while incurring the overhead of
  * decompression so a balance has to be achieved between the two depending on available memory).
  * Implementations can apply various policies like LRU, LFU, FIFO or combinations.
  * Implementations usually should be indifferent to the type of memory used by the managed
@@ -37,17 +37,18 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
 
   /**
    * Set/reset the upper limit on the memory (heap or off-heap) in bytes. If the current usage
-   * exceeds the given limit, then objects should be evicted from cache immediately as required.
+   * exceeds the given limit, then objects should be evicted from cache immediately to honor the
+   * new limit.
    *
    * @param newMaxMemory the new upper limit for the memory in bytes
-   * @param timestamp the current timestamp which should be the [[System.currentTimeMillis()]]
+   * @param timestamp the current timestamp which should be the [[System.currentTimeMillis]]
    *                  at the start of operation
    */
   def setLimit(newMaxMemory: Long, timestamp: Long): Unit
 
   /**
    * Add a compressed/decompressed object to the cache. Note that the fields of the passed object
-   * are are expected to be non-null and/or value.
+   * are expected to be non-null and valid.
    *
    * A successful put operation does not mean a whole lot in most cases because the object that
    * was put could be evicted soon after by other puts/loads. Using a loader in [[getDecompressed]]
@@ -56,13 +57,13 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    * @param key A unique key for the object. This object cannot be same as the value itself or
    *            contain a reference to value since this can be retained for long-term statistics.
    * @param either The object to be put in the cache. Note that it is converted to a form
-   *               appropriate for storage by [[EvictionManager]]; all the fields of the provided
-   *               object are required to be valid/non-null; if the [[Either]] resolves to
+   *               appropriate for storage by [[EvictionManager]]. All the fields of the provided
+   *               object are required to be valid/non-null. If the [[Either]] resolves to
    *               [[Left]], then its [[CacheValue.isCompressed]] should be true else false.
-   * @param transformer Implementation to compress/decompress the provided `value` and `finalize`
-   *                    it for release. Typically this should have static implementations
+   * @param transformer Implementation to compress/decompress the provided `value` and create
+   *                    `finalizer` for release. Typically this should have static implementations
    *                    (e.g. per `compressionAlgorithm`) to minimize the objects held in cache.
-   * @param timestamp The current [[System.currentTimeMillis()]]. This has been provided
+   * @param timestamp The current [[System.currentTimeMillis]]. This has been provided
    *                  as an argument with the expectation that a single common timestamp
    *                  will be used for all objects that are part of a single operation so
    *                  that there is no relative priority among objects of the same scan/insert.
@@ -94,18 +95,16 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    * the [[CacheValue]] so the value as put in [[putObject]] or returned by `loader` is returned
    * (and it is required that [[CacheValue.isCompressed]] is false for both cases).
    *
-   * The return value if found in cache or returned by loader, will have its reference count
+   * The return value, if found in cache or returned by loader, will have its reference count
    * incremented (i.e. equivalent of [[CacheValue.use]]) so callers should do an explicit
    * `release` when done with the object.
    *
    * @param key The key to lookup the object which should be the same as the one provided in
    *            the [[putObject]] operation.
-   * @param timestamp The current [[System.currentTimeMillis()]]. This has been provided
+   * @param timestamp The current [[System.currentTimeMillis]]. This has been provided
    *                  as an argument with the expectation that a single common timestamp
    *                  will be used for all objects that are part of a single operation so
-   *                  that there is no relative priority among objects of the same scan/insert;
-   *                  this is used internally by [[EvictionManager]] for cases where the
-   *                  decompressed object is cached transparently.
+   *                  that there is no relative priority among objects of the same scan/insert.
    * @param loader In case the value is not found in cache, then this can be optionally provided
    *               to load the object with its associated [[TransformValue]] and possibly put
    *               into cache before returning. If the result resolves to [[Left]], then its
@@ -125,28 +124,28 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    * any statistics recorded against the key so should be only used if the key is really gone.
    *
    * @param key The key to lookup the object which should be the same as the one provided in
-   *            the [[putObject]] operation.
+   *            the [[putObject]] and [[getDecompressed]] operations.
    *
    * @return true if the key was present in cache and removed, and false otherwise
    */
   def removeObject(key: Comparable[AnyRef]): Boolean
 
   /**
-   * Remove all the entries in cache for which the given predicate returns true. For example this
-   * can be used to cleanup all entries of a table after it is dropped.
+   * Remove all the entries in cache, including their statistics, for which the given predicate
+   * is true. This can be used, for example, to remove all entries of a table when it is dropped.
    *
-   * @param predicate function taking a key and returning a boolean
+   * @param predicate function taking a key and returning true if the entry should be removed
    *
    * @return number of entries that were removed
    */
   def removeAll(predicate: Comparable[AnyRef] => Boolean): Int
 
   /**
-   * For cases where any of the other methods had thrown unexpected errors like OutOfMemory
+   * For cases where any of the other methods have thrown unexpected errors like OutOfMemory,
    * the cache count and maps can potentially go out of sync. This method can be explicitly
    * invoked to check and bring the cache into a consistent shape.
    *
-   * @return True if the cache was consistent and false otherwise.
+   * @return True if the cache was consistent and false if fixes were required to the cache.
    */
   def checkAndForceConsistency(): Boolean
 }

@@ -18,16 +18,16 @@
 package com.github.spark.lightspeed.memory
 
 /**
- * The value object including a unique `key` for the object that is maintained in-memory (either
- * on-heap or off-heap depending on the implementation of this class) by [[EvictionManager]] and
- * can be removed by it when there is memory pressure.
+ * An object that can be cached by [[EvictionManager]] and is paired with a unique `key` for the
+ * object that is maintained in-memory (either on-heap or off-heap depending on the implementation
+ * of this class) by [[EvictionManager]] and can be removed by it when there is memory pressure.
  *
- * The [[EvictionManager]] can deal with two kinds of objects: compressed and decompressed.
- * Implementations can transparently switch between compressed and decompressed objects depending
- * on memory pressure and the overall cost (e.g. compression allows for more objects to be cached
- * but there can be significant overhead to decompression, so there needs to be a balance between
- * the two). Implementations of this class should indicate it in the result of `isCompressed`
- * method and provide [[TransformValue]] implementation to transform between the two in the
+ * The [[EvictionManager]] can deal with two kinds of objects: compressed and decompressed and can
+ * transparently switch between compressed and decompressed objects depending on memory pressure
+ * and the overall cost (e.g. compression allows for more objects to be cached but there can be
+ * significant overhead to decompression, so there needs to be a balance between the two).
+ * Implementations of this class should indicate it in the result of `isCompressed` method and
+ * provide [[TransformValue]] implementation to transform between the two in the
  * [[EvictionManager]] API methods. If the object has no compressed/decompressed versions, then
  * the `isCompressed` method should return false and [[TransformValue.compressionAlgorithm]]
  * of the passed [[TransformValue]] should be [[None]].
@@ -41,10 +41,10 @@ trait CacheValue {
 
   /**
    * Size in bytes occupied by the object in memory. The size for the `key` should be included
-   * in this even if that object is created on-the-fly since [[EvictionManager]] cache will retain
-   * a copy of the key. Alternatively the memory consumed by keys needs to be accounted separately
-   * beyond [[EvictionManager]]'s limit (which is not a memory manager per-se rather a helper for
-   * a full-fledged manager that deals with accounting of overall memory like Spark's UMM).
+   * in this for accurate bookkeeping by [[EvictionManager]]. Alternatively the memory consumed
+   * by keys needs to be accounted separately beyond [[EvictionManager]]'s limit (which is not
+   * a memory manager per-se rather a helper for a full-fledged manager that deals with accounting
+   * of overall memory like Spark's MemoryManager).
    */
   def memorySize: Long
 
@@ -62,10 +62,12 @@ trait CacheValue {
   private[memory] def finalizer: FinalizeValue[_ <: CacheValue]
 
   /**
-   * Set a [[FinalizeValue]] for this object to be invoked when this [[referenceCount]] goes down
+   * Set a [[FinalizeValue]] for this object to be invoked when its [[referenceCount]] goes down
    * to zero in [[release]].
    *
-   * @throws IllegalArgumentException if no [[FinalizeValue]] is required for this object
+   * @throws IllegalArgumentException if no [[FinalizeValue]] is required for this object which
+   *                                  should be indicated by [[TransformValue.createFinalizer]]
+   *                                  returning [[None]]
    */
   private[memory] def finalizer_=(finalizer: FinalizeValue[_ <: CacheValue]): Unit
 
@@ -113,16 +115,16 @@ trait CacheValue {
   /**
    * Decrement the [[referenceCount]] and `finalize` this object if it has gone down to zero
    * (and thus it is already gone from [[EvictionManager]] cache). Any further accesses to this
-   * object can result in undefined behaviour if this method returned true. Specifically accessing
-   * off-heap objects after this method returned true can lead to a JVM crash. Used by
+   * object can result in undefined behaviour if this method returned true. Specifically, accessing
+   * off-heap objects after this method returns true can lead to a JVM crash. Used by
    * [[EvictionManager]] when an object is evicted and should be invoked by all other users
    * that are using this object with [[use]] in a finally block.
    *
-   * @return true if [[referenceCount]] went down to zero and object was `finalized` if a
-   *         [[finalizer]] was set for the object
+   * @return true if [[referenceCount]] goes down to zero (in which case the [[referenceCount]] is
+   *         set as negative) and object is `finalized` if a [[finalizer]] was set for the object
    *
    * @throws IllegalStateException if the [[referenceCount]] is already zero or below meaning
-   *                               object was already `finalized`
+   *                               object was already `finalized` by previous [[release]] calls
    */
   final def release(): Boolean = synchronized {
     val ref = referenceCount

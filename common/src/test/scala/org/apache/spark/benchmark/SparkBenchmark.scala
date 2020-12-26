@@ -21,6 +21,9 @@ import java.io.OutputStream
 
 import scala.concurrent.duration._
 
+/**
+ * Expose Spark's [[Benchmark]] class to outside the `spark` package.
+ */
 class SparkBenchmark(
     name: String,
     valuesPerIteration: Long,
