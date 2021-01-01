@@ -162,7 +162,7 @@ object EvictionService {
    *                  be removed and false otherwise
    */
   def removeEvictionManagers(predicate: Class[_] => Boolean): Unit = {
-    val clearAll = (_: Comparable[AnyRef]) => true
+    val clearAll = (_: Comparable[_ <: AnyRef]) => true
     val managerIter = evictionManagers.entrySet().iterator()
     val classesToBeRemoved = Collections.newOpenHashSet[Class[_]]()
     while (managerIter.hasNext) {

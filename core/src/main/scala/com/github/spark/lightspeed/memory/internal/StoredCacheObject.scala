@@ -17,7 +17,12 @@
 
 package com.github.spark.lightspeed.memory.internal
 
-import com.github.spark.lightspeed.memory.{CacheValue, EvictionManager, TransformValue}
+import com.github.spark.lightspeed.memory.{
+  CacheValue,
+  CacheValueStats,
+  EvictionManager,
+  TransformValue
+}
 
 /**
  * Base class for key+value pairs stored in the in-memory cache by [[EvictionManager]].
@@ -35,7 +40,7 @@ import com.github.spark.lightspeed.memory.{CacheValue, EvictionManager, Transfor
  * @tparam T the concrete type of [[CacheValue]] contained in this object
  */
 sealed abstract class StoredCacheObject[T <: CacheValue](
-    final val key: Comparable[AnyRef],
+    final val key: Comparable[_ <: AnyRef],
     final val value: T,
     final val transformer: TransformValue[_ <: CacheValue, _ <: CacheValue],
     initialWeightage: Double) {
@@ -129,7 +134,7 @@ sealed abstract class StoredCacheObject[T <: CacheValue](
  * @tparam C the type of compressed object obtained after compression
  */
 final class DecompressedCacheObject[D <: CacheValue, C <: CacheValue](
-    _key: Comparable[AnyRef],
+    _key: Comparable[_ <: AnyRef],
     _value: D,
     _transformer: TransformValue[C, D],
     _weightage: Double)
@@ -176,7 +181,7 @@ final class DecompressedCacheObject[D <: CacheValue, C <: CacheValue](
  * @tparam D the type of decompressed object obtained after decompression
  */
 final class CompressedCacheObject[C <: CacheValue, D <: CacheValue](
-    _key: Comparable[AnyRef],
+    _key: Comparable[_ <: AnyRef],
     _value: C,
     _transformer: TransformValue[C, D],
     _weightage: Double,
@@ -186,7 +191,7 @@ final class CompressedCacheObject[C <: CacheValue, D <: CacheValue](
   override def isCompressed: Boolean = true
 
   override def toStats: CacheValueStats =
-    new CompressedCacheValueStats(weightageWithoutBoost, generation, compressionSavings)
+    new CacheValueStats(weightageWithoutBoost - compressionSavings, generation)
 
   /**
    * Decompress the given object (should be a hard reference to the contained object) and return

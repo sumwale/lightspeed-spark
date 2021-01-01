@@ -17,13 +17,13 @@
 
 package com.github.spark.lightspeed.collection
 
-import java.util.concurrent.{ConcurrentHashMap, CyclicBarrier}
+import java.util.concurrent.{ConcurrentHashMap, ConcurrentSkipListSet, CyclicBarrier}
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 
 import com.github.spark.lightspeed.SparkSuite
-import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap
+import it.unimi.dsi.fastutil.objects.{Object2ObjectOpenHashMap, ObjectOpenHashSet}
 import org.eclipse.collections.impl.map.mutable.UnifiedMap
 
 import org.apache.spark.benchmark.SparkBenchmark
@@ -250,4 +250,135 @@ class ConcurrentMapTest extends SparkSuite {
       }
     }
   }
+
+  benchmark("iteration comparison") {
+    val numItems = 20
+    val numSetItems = 5000000
+    val step = numSetItems / numItems
+    val minNumIters = 100
+
+    val data = new ConcurrentSkipListSet[StoredObject]((o1: StoredObject, o2: StoredObject) => {
+      if (o1 ne o2) {
+        val cmp = java.lang.Double.compare(o1.weightage, o2.weightage)
+        if (cmp != 0) cmp
+        else {
+          val c = o1.key.asInstanceOf[Comparable[AnyRef]].compareTo(o2.key.asInstanceOf[AnyRef])
+          // order compressed having same key to be lower priority than decompressed
+          if (c != 0) c
+          else java.lang.Long.compare(System.identityHashCode(o1), System.identityHashCode(o2))
+        }
+      } else 0
+    })
+    val hashSet = new java.util.HashSet[StoredObject]
+    val openHashSet = new ObjectOpenHashSet[StoredObject]
+    val linkedHashSet = new java.util.LinkedHashSet[StoredObject]
+    val arrayList = new java.util.ArrayList[StoredObject]()
+    val linkedList = new java.util.LinkedList[StoredObject]()
+
+    def populateData(collection: java.util.Collection[StoredObject], step: Int): Unit = {
+      for (i <- 0 until numSetItems by step) {
+        val key = s"someUniqueKeyForTheSet_$i"
+        val value = s"someValueForStoredObject_$i".getBytes
+        val weightage = 17.8 * (i % 20)
+        val weightageWithoutBoost = weightage - 23.1
+        val generation = i % 10
+        if ((i & 0x1) == 0) {
+          collection.add(
+            new StoredObject(key, value, weightage, weightageWithoutBoost, generation))
+        } else {
+          val compressionSavings = weightage / 4.4
+          collection.add(
+            new CompressedStoredObject(
+              key,
+              value,
+              weightage,
+              weightageWithoutBoost,
+              generation,
+              compressionSavings))
+        }
+      }
+    }
+    populateData(data, step = 1)
+    populateData(hashSet, step)
+    populateData(openHashSet, step)
+    populateData(linkedHashSet, step)
+    populateData(arrayList, step)
+    populateData(linkedList, step)
+
+    def iterateSet(checkCollection: java.util.Set[StoredObject]): Int = {
+      val timeWeightage = 204.8
+      var result = 0
+      val iter = data.iterator()
+      while (iter.hasNext) {
+        val candidate = iter.next()
+        if (!checkCollection.contains(candidate)) {
+          val checkIter = checkCollection.iterator()
+          while (checkIter.hasNext) {
+            val check = checkIter.next()
+            if (check.generation > candidate.generation &&
+                check.weightage < candidate.weightage + timeWeightage) {
+              result += 1
+            }
+          }
+        }
+      }
+      result
+    }
+    def iterateData(checkCollection: java.util.Collection[StoredObject]): Int = {
+      val timeWeightage = 204.8
+      var result = 0
+      val iter = data.iterator()
+      while (iter.hasNext) {
+        val candidate = iter.next()
+        var tempResult = 0
+        val checkIter = checkCollection.iterator()
+        while (tempResult >= 0 && checkIter.hasNext) {
+          val check = checkIter.next()
+          if (check.equals(candidate)) tempResult = -1
+          else if (check.generation > candidate.generation &&
+                   check.weightage < candidate.weightage + timeWeightage) {
+            tempResult += 1
+          }
+        }
+        if (tempResult > 0) result += tempResult
+      }
+      result
+    }
+
+    val expectedResult = iterateData(hashSet)
+    val benchmark = new SparkBenchmark("Compare iteration", numItems * numSetItems, minNumIters)
+
+    benchmark.addCase("Java HashSet") { _ =>
+      assert(iterateSet(hashSet) == expectedResult)
+    }
+    benchmark.addCase("Fastutil OpenHashSet") { _ =>
+      assert(iterateSet(openHashSet) == expectedResult)
+    }
+    benchmark.addCase("Java LinkedHashSet") { _ =>
+      assert(iterateSet(linkedHashSet) == expectedResult)
+    }
+    benchmark.addCase("Java ArrayList") { _ =>
+      assert(iterateData(arrayList) == expectedResult)
+    }
+    benchmark.addCase("Java LinkedList") { _ =>
+      assert(iterateData(linkedList) == expectedResult)
+    }
+    benchmark.run()
+  }
 }
+
+sealed class StoredObject(
+    val key: Comparable[_ <: AnyRef],
+    val value: AnyRef,
+    val weightage: Double,
+    val weightageWithoutBoost: Double,
+    val generation: Int)
+
+final class CompressedStoredObject(
+    key: Comparable[_ <: AnyRef],
+    value: AnyRef,
+    weightage: Double,
+    weightageWithoutBoost: Double,
+    generation: Int,
+    val compressionSavings: Double)
+    extends StoredObject(key, value, weightage, weightageWithoutBoost, generation)

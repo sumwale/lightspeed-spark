@@ -78,6 +78,11 @@ trait CacheValue {
   final def isInUse: Boolean = synchronized(referenceCount > 0)
 
   /**
+   * Returns true if the [[referenceCount]] is valid.
+   */
+  final def isValid: Boolean = synchronized(referenceCount >= 0)
+
+  /**
    * Mark the object as being used to prevent it being `finalized` by incrementing its
    * [[referenceCount]]. Normally callers should ensure that the [[release]] is invoked in
    * some finally block to always decrement the [[referenceCount]]. In the worst case the object
@@ -131,10 +136,10 @@ trait CacheValue {
     if (ref > 0) {
       referenceCount = ref - 1
       if (ref == 1) {
-        val ref = finalizer
-        if (ref ne null) {
-          ref.clear()
-          ref.finalizeReferent()
+        val f = finalizer
+        if (f ne null) {
+          f.clear()
+          f.finalizeReferent()
           finalizer = null
         }
         referenceCount = -1 // indicates that this object has been finalized
@@ -160,4 +165,24 @@ trait CacheValue {
       release()
     }
   }
+}
+
+/**
+ * Bare statistics of [[CacheValue]]s used by [[EvictionManager]] to record for future either
+ * after eviction when the object might be "resurrected", or even persisted for future usage.
+ *
+ * @param weightage base `weightage` of the cached decompressed object
+ * @param generation indicates the number of times an object was evicted and then "resurrected"
+ */
+final class CacheValueStats(val weightage: Double, val generation: Int) {
+
+  /**
+   * Return a new [[CacheValueStats]] or self with added weightage.
+   *
+   * @param delta extra weightage to be added (can be negative)
+   *
+   * @return new [[CacheValueStats]] or self with updated weightage
+   */
+  def addWeightage(delta: Double): CacheValueStats =
+    if (delta == 0.0) this else new CacheValueStats(weightage + delta, generation)
 }

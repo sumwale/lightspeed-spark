@@ -19,7 +19,7 @@ package com.github.spark.lightspeed.util
 
 import java.util.{Map => JMap, Set => JSet}
 
-import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet
+import it.unimi.dsi.fastutil.objects.{Object2ObjectOpenHashMap, ObjectOpenHashSet}
 
 /**
  * Set of utility methods around useful fastutil collections while also creating a minimal shadow
@@ -28,16 +28,16 @@ import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet
 object Collections {
 
   /**
-   * Returns an open-addressed HashMap. Primary advantage is much reduced overhead compared
-   * to normal java/scala HashMap implementations.
+   * Returns an open-addressed HashSet. Primary advantage is much reduced overhead compared
+   * to normal java/scala HashSet implementations.
    *
    * @tparam K type of keys in the set
    */
   def newOpenHashSet[K](): JSet[K] = new ObjectOpenHashSet[K]
 
   /**
-   * Returns an open-addressed HashMap. Primary advantage is much reduced overhead compared
-   * to normal java/scala HashMap implementations.
+   * Returns an open-addressed HashSet. Primary advantage is much reduced overhead compared
+   * to normal java/scala HashSet implementations.
    *
    * @param initialCapacity hint for minimum number of elements in the set
    * @param loadFactor the load factor of the hash set
@@ -46,6 +46,28 @@ object Collections {
    */
   def newOpenHashSet[K](initialCapacity: Int, loadFactor: Float): JSet[K] =
     new ObjectOpenHashSet[K](initialCapacity, loadFactor)
+
+  /**
+   * Returns an open-addressed HashMap. Primary advantage is much reduced overhead compared
+   * to normal java/scala HashMap implementations.
+   *
+   * @tparam K type of keys in the map
+   * @tparam V type of values in the map
+   */
+  def newOpenHashMap[K, V](): JMap[K, V] = new Object2ObjectOpenHashMap[K, V]
+
+  /**
+   * Returns an open-addressed HashMap. Primary advantage is much reduced overhead compared
+   * to normal java/scala HashMap implementations.
+   *
+   * @param initialCapacity hint for minimum number of elements in the map
+   * @param loadFactor the load factor of the hash map
+   *
+   * @tparam K type of keys in the map
+   * @tparam V type of values in the map
+   */
+  def newOpenHashMap[K, V](initialCapacity: Int, loadFactor: Float): JMap[K, V] =
+    new Object2ObjectOpenHashMap[K, V](initialCapacity, loadFactor)
 
   /**
    * Returns an open-addressed HashMap which is LRU in terms of puts but not reads. Primary

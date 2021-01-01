@@ -70,27 +70,27 @@ object Utils {
    * @return a [[StoredCacheObject]] to be cached by [[EvictionManager]]
    */
   def newStoredCacheObject[C <: CacheValue, D <: CacheValue](
-      key: Comparable[AnyRef],
-      value: Either[C, D],
+      key: Comparable[_ <: AnyRef],
+      value: CacheValue,
       transformer: TransformValue[C, D],
       timeWeightage: Double,
-      decompressionToDiskReadCost: Double): StoredCacheObject[_ <: CacheValue] = value match {
-    case Left(value) =>
-      require(value.isCompressed)
+      decompressionToDiskReadCost: Double): StoredCacheObject[_ <: CacheValue] = {
+    if (value.isCompressed) {
+      val compressedVal = value.asInstanceOf[C]
       val compressionSavings = calcCompressionSavings(
         timeWeightage,
         decompressionToDiskReadCost,
         value.memorySize,
-        transformer.decompressedSize(value))
+        transformer.decompressedSize(compressedVal))
       new CompressedCacheObject[C, D](
         key,
-        value,
+        compressedVal,
         transformer,
         timeWeightage + compressionSavings,
         compressionSavings)
-    case Right(value) =>
-      require(!value.isCompressed)
-      new DecompressedCacheObject[D, C](key, value, transformer, timeWeightage)
+    } else {
+      new DecompressedCacheObject[D, C](key, value.asInstanceOf[D], transformer, timeWeightage)
+    }
   }
 
   /**

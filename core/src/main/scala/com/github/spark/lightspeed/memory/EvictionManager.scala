@@ -68,11 +68,6 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    *                  will be used for all objects that are part of a single operation so
    *                  that there is no relative priority among objects of the same scan/insert.
    *
-   * @return True if the put succeeded and false if the put failed due to lack of memory. A return
-   *         value of true may not be very useful since the entry can potentially be evicted soon
-   *         after due to other concurrent puts/loads. A return value of false, on the other hand,
-   *         is a definite indicator that the value was not cached.
-   *
    * @throws IllegalArgumentException if [[TransformValue.compressionAlgorithm]] is None but
    *                                  [[CacheValue.isCompressed]] is true
    * @throws IllegalArgumentException if [[Either]] argument is [[Left]] but
@@ -80,14 +75,14 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    *                                  argument is [[Right]]
    * @throws IllegalArgumentException if `key` or `transformer` or the `transformer's`
    *                                  `compressionAlgorithm` is null or value's `memorySize` is -ve
-   * @throws IllegalArgumentException if the given object's memorySize is greater than the
-   *                                  [[EvictionManager]]'s maximum limit itself
+   * @throws UnsupportedOperationException if the given object's memorySize is greater than the
+   *                                       [[EvictionManager]]'s maximum limit itself
    */
   def putObject(
-      key: Comparable[AnyRef],
+      key: Comparable[_ <: AnyRef],
       either: Either[C, D],
       transformer: TransformValue[C, D],
-      timestamp: Long): Boolean
+      timestamp: Long): Unit
 
   /**
    * Get the decompressed version of the object for given key.
@@ -114,10 +109,31 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    *         case the object will have its reference count incremented.
    */
   def getDecompressed(
-      key: Comparable[AnyRef],
+      key: Comparable[_ <: AnyRef],
       timestamp: Long,
-      loader: Option[Comparable[AnyRef] => Option[(Either[C, D], TransformValue[C, D])]])
+      loader: Option[Comparable[_ <: AnyRef] => Option[(Either[C, D], TransformValue[C, D])]])
     : Option[D]
+
+  /**
+   * Get [[CacheValueStats]] for the keys that satisfy the given `predicate`.
+   *
+   * @param predicate function taking a key and returning true if [[CacheValueStats]] should be
+   *                  included in the result
+   *
+   * @return map of keys to their corresponding [[CacheValueStats]]
+   */
+  def getStatistics(predicate: Comparable[_ <: AnyRef] => Boolean)
+    : scala.collection.Map[Comparable[_ <: AnyRef], CacheValueStats]
+
+  /**
+   * Put a list of statistics into the [[EvictionManager]] as extracted using [[getStatistics]].
+   * This will be stored internally and will be applied when the values for those keys are
+   * actually cached by [[getDecompressed]] or [[putObject]].
+   *
+   * @param statistics map of statistics as returned by [[getStatistics]]
+   */
+  def putStatistics(
+      statistics: scala.collection.Map[Comparable[_ <: AnyRef], CacheValueStats]): Unit
 
   /**
    * Remove the given key from cache and report if the operation was successful. This also removes
@@ -128,7 +144,7 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    *
    * @return true if the key was present in cache and removed, and false otherwise
    */
-  def removeObject(key: Comparable[AnyRef]): Boolean
+  def removeObject(key: Comparable[_ <: AnyRef]): Boolean
 
   /**
    * Remove all the entries in cache, including their statistics, for which the given predicate
@@ -138,7 +154,7 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    *
    * @return number of entries that were removed
    */
-  def removeAll(predicate: Comparable[AnyRef] => Boolean): Int
+  def removeAll(predicate: Comparable[_ <: AnyRef] => Boolean): Int
 
   /**
    * For cases where any of the other methods have thrown unexpected errors like OutOfMemory,

@@ -27,11 +27,14 @@ import com.google.common.base.FinalizableWeakReference
  *
  * Note: Implementations cannot override the [[clear]] method and rather should override
  * [[basicClear]] for any additional cleanup actions (which should also call `super.basicClear`).
- * The invocation of [[basicClear]] is ensured to be done exactly once.
+ * The invocation of [[basicClear]] is ensured to be done exactly once by [[clear]].
  */
 abstract class FinalizeValue[T <: CacheValue](value: T)
     extends FinalizableWeakReference[T](value, EvictionService.finalizerQueue) {
 
+  /**
+   * Flag to atomically ensure that all actions in [[basicClear]] are invoked exactly once.
+   */
   @volatile protected[this] final var invoked: Int = 0
 
   /**
@@ -42,11 +45,21 @@ abstract class FinalizeValue[T <: CacheValue](value: T)
    * Implementations should override this method to add any actions required in `clear`
    * just prior to [[finalizeReferent]] such as accounting in Spark's MemoryManager.
    */
-  def basicClear(): Unit = super.clear()
+  protected def basicClear(): Unit = super.clear()
 
-  override final def clear(): Unit = {
+  override final def clear(): Unit = clear(skipEvictionServiceMap = false)
+
+  /**
+   * Invoke all the actions in [[basicClear]] exactly once and optionally remove this
+   * `WeakReference` from [[EvictionService]]'s weak reference map.
+   *
+   * @param skipEvictionServiceMap If false then remove from [[EvictionService]]'s weak reference
+   *                               map and skip it if true. For the latter case callers must
+   *                               ensure that this weak reference is not present in that map.
+   */
+  final def clear(skipEvictionServiceMap: Boolean): Unit = {
     if (Utils.compareAndSetInvoked(this, 0, 1)) {
-      EvictionService.removeWeakReference(this)
+      if (!skipEvictionServiceMap) EvictionService.removeWeakReference(this)
       basicClear()
     }
   }
