@@ -32,7 +32,7 @@ package com.github.spark.lightspeed.memory
  * the `isCompressed` method should return false and [[TransformValue.compressionAlgorithm]]
  * of the passed [[TransformValue]] should be [[None]].
  */
-trait CacheValue {
+trait CacheValue extends FreeValue {
 
   /**
    * Used internally and should only be accessed/updated within synchronized block.
@@ -126,7 +126,8 @@ trait CacheValue {
    * that are using this object with [[use]] in a finally block.
    *
    * @return true if [[referenceCount]] goes down to zero (in which case the [[referenceCount]] is
-   *         set as negative) and object is `finalized` if a [[finalizer]] was set for the object
+   *         set as negative) and object is `finalized` either using the [[finalizer]] if it was
+   *         set for the object or else by directly invoking [[free]]
    *
    * @throws IllegalStateException if the [[referenceCount]] is already zero or below meaning
    *                               object was already `finalized` by previous [[release]] calls
@@ -136,18 +137,28 @@ trait CacheValue {
     if (ref > 0) {
       referenceCount = ref - 1
       if (ref == 1) {
-        val f = finalizer
-        if (f ne null) {
-          f.clear()
-          f.finalizeReferent()
-          finalizer = null
-        }
+        finalizeSelf()
         referenceCount = -1 // indicates that this object has been finalized
         true
       } else false
     } else {
       throw new IllegalStateException(s"release(): invalid referenceCount=$ref for $toString")
     }
+  }
+
+  /**
+   * Clear the WeakReference, if any, to avoid it being enqueued and [[free]] the object.
+   *
+   * NOTE: this method is not synchronized by design and callers should either invoke within a
+   * synchronized block or ensure that only a single thread can possibly access/update this object.
+   */
+  private[memory] final def finalizeSelf(): Unit = {
+    val f = finalizer
+    if (f ne null) {
+      f.clear()
+      f.finalizeReferent()
+      finalizer = null
+    } else free()
   }
 
   /**
@@ -165,6 +176,23 @@ trait CacheValue {
       release()
     }
   }
+}
+
+/**
+ * Base trait encapsulating the actions required to `finalize` an object like freeing off-heap
+ * memory, bookkeeping with a memory manager like that of Spark etc.
+ */
+trait FreeValue {
+
+  /**
+   * Perform any additional cleanup for the object to `finalize` it (e.g. free memory for off-heap
+   * objects) for a [[CacheValue]] which should be identical to that of the [[FinalizeValue]]
+   * returned by [[TransformValue.createFinalizer]] (or no-op if that returns [[None]]).
+   *
+   * NOTE: Any further accesses to the object can result in undefined behaviour once this is
+   * invoked. Specifically, accessing off-heap objects after this method can lead to a JVM crash.
+   */
+  protected def free(): Unit
 }
 
 /**

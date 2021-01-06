@@ -17,12 +17,7 @@
 
 package com.github.spark.lightspeed.memory.internal
 
-import com.github.spark.lightspeed.memory.{
-  CacheValue,
-  CacheValueStats,
-  EvictionManager,
-  TransformValue
-}
+import com.github.spark.lightspeed.memory.{CacheValue, CacheValueStats, EvictionManager, TransformValue}
 
 /**
  * Base class for key+value pairs stored in the in-memory cache by [[EvictionManager]].
@@ -192,17 +187,4 @@ final class CompressedCacheObject[C <: CacheValue, D <: CacheValue](
 
   override def toStats: CacheValueStats =
     new CacheValueStats(weightageWithoutBoost - compressionSavings, generation)
-
-  /**
-   * Decompress the given object (should be a hard reference to the contained object) and return
-   * [[DecompressedCacheObject]] and contained object. Should only be used by [[EvictionManager]].
-   */
-  def decompress(value: C): DecompressedCacheObject[D, C] = {
-    val transformer = this.transformer.asInstanceOf[TransformValue[C, D]]
-    new DecompressedCacheObject[D, C](
-      key,
-      transformer.decompress(value),
-      transformer,
-      weightageWithoutBoost - compressionSavings)
-  }
 }
