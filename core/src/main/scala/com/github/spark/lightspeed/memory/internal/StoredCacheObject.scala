@@ -108,6 +108,11 @@ sealed abstract class StoredCacheObject[T <: CacheValue](
   }
 
   /**
+   * Returns true if a non-zero "boost" was previously applied using [[addGenerationalBoost]].
+   */
+  private[memory] final def hasGenerationalBoost: Boolean = _weightage != _weightageWithoutBoost
+
+  /**
    * Returns true if this object is compressed and false otherwise. If the [[CacheValue]]
    * does not support compression (i.e. [[TransformValue.compressionAlgorithm]] is [[None]]),
    * then this should be false.
@@ -154,12 +159,14 @@ final class DecompressedCacheObject[D <: CacheValue, C <: CacheValue](
       decompressionToDiskReadCost,
       compressedVal.memorySize,
       value.memorySize)
-    new CompressedCacheObject[C, D](
+    val compressed = new CompressedCacheObject[C, D](
       key,
       compressedVal,
       transformer,
       weightageWithoutBoost + compressionSavings,
       compressionSavings)
+    compressed.generation = generation
+    compressed
   }
 }
 

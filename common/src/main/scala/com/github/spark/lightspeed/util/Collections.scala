@@ -70,24 +70,36 @@ object Collections {
     new Object2ObjectOpenHashMap[K, V](initialCapacity, loadFactor)
 
   /**
-   * Returns an open-addressed HashMap which is LRU in terms of puts but not reads. Primary
-   * advantage is much reduced overhead compared to normal linked/LRU map implementations.
+   * Returns an [[LRUMap]] with given parameters. Primary advantage is much reduced overhead
+   * compared to normal linked/LRU map implementations.
+   *
+   * @param maximumCapacity The upper cap on the maximum capacity of the hash map. If the size
+   *                        exceeds this value, then entries are removed from the map in LRU order.
    *
    * @tparam K type of keys in the map
    * @tparam V type of values in the map
    */
-  def newLRUHashMap[K, V](): JMap[K, V] = new PutLRUHashMap[K, V]()
+  def newLRUMap[K, V](maximumCapacity: Int): LRUMap[K, V] = new LRUMap[K, V](maximumCapacity)
 
   /**
-   * Returns an open-addressed HashMap which is LRU in terms of puts but not reads. Primary
-   * advantage is much reduced overhead compared to normal linked/LRU map implementations.
+   * Returns an [[LRUMap]] with given parameters. Primary advantage is much reduced overhead
+   * compared to normal linked/LRU map implementations.
    *
-   * @param initialCapacity hint for minimum number of elements in the map
-   * @param loadFactor the load factor of the hash map
+   * @param initialCapacity The initial capacity of the hash map. For best performance this should
+   *                        be close to the maximum number of elements that will be in the map in
+   *                        its entire lifetime.
+   * @param maximumCapacity The upper cap on the maximum capacity of the hash map. If the size
+   *                        exceeds this value, then entries are removed from the map in LRU order.
+   * @param loadFactor The load factor for the hash map used for internal sizing of the map which
+   *                   should be a floating point number between 0.0 and 1.0. The map will be
+   *                   rehashed when the ratio of occupied size to internal size exceeds this value.
    *
    * @tparam K type of keys in the map
    * @tparam V type of values in the map
    */
-  def newLRUHashMap[K, V](initialCapacity: Int, loadFactor: Float): JMap[K, V] =
-    new PutLRUHashMap[K, V](initialCapacity, loadFactor)
+  def newLRUMap[K, V](
+      initialCapacity: Int,
+      maximumCapacity: Int,
+      loadFactor: Float): LRUMap[K, V] =
+    new LRUMap[K, V](initialCapacity, maximumCapacity, loadFactor)
 }

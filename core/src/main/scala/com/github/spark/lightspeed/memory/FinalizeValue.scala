@@ -39,7 +39,7 @@ abstract class FinalizeValue[T <: CacheValue](value: T)
     with FreeValue {
 
   /**
-   * Flag to ensure that [[free]] is invoked no more than once.
+   * Flag to ensure that [[free]] is not invoked more than once.
    */
   @volatile protected[this] final var invoked: Int = 0
 

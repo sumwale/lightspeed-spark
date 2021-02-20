@@ -35,6 +35,8 @@ package com.github.spark.lightspeed.memory
  */
 trait EvictionManager[C <: CacheValue, D <: CacheValue] {
 
+  type StatisticsMap = scala.collection.Map[Comparable[_ <: AnyRef], CacheValueStats]
+
   /**
    * Set/reset the upper limit on the memory (heap or off-heap) in bytes. If the current usage
    * exceeds the given limit, then objects should be evicted from cache immediately to honor the
@@ -68,6 +70,9 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    *                  will be used for all objects that are part of a single operation so
    *                  that there is no relative priority among objects of the same scan/insert.
    *
+   * @return true if the value was put into the cache (though can be evicted soon after) and false
+   *         if caching was skipped due to too large a size or small `weightage`
+   *
    * @throws IllegalArgumentException if [[TransformValue.compressionAlgorithm]] is None but
    *                                  [[CacheValue.isCompressed]] is true
    * @throws IllegalArgumentException if [[Either]] argument is [[Left]] but
@@ -82,7 +87,7 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
       key: Comparable[_ <: AnyRef],
       either: Either[C, D],
       transformer: TransformValue[C, D],
-      timestamp: Long): Unit
+      timestamp: Long): Boolean
 
   /**
    * Get the decompressed version of the object for given key.
@@ -122,8 +127,7 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    *
    * @return map of keys to their corresponding [[CacheValueStats]]
    */
-  def getStatistics(predicate: Comparable[_ <: AnyRef] => Boolean)
-    : scala.collection.Map[Comparable[_ <: AnyRef], CacheValueStats]
+  def getStatistics(predicate: Comparable[_ <: AnyRef] => Boolean): StatisticsMap
 
   /**
    * Put a list of statistics into the [[EvictionManager]] as extracted using [[getStatistics]].
@@ -132,8 +136,7 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    *
    * @param statistics map of statistics as returned by [[getStatistics]]
    */
-  def putStatistics(
-      statistics: scala.collection.Map[Comparable[_ <: AnyRef], CacheValueStats]): Unit
+  def putStatistics(statistics: StatisticsMap): Unit
 
   /**
    * Remove the given key from cache and report if the operation was successful. This also removes
@@ -152,7 +155,7 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    *
    * @param predicate function taking a key and returning true if the entry should be removed
    *
-   * @return number of entries that were removed
+   * @return number of cached entries that were removed (excludes statistics-only removals)
    */
   def removeAll(predicate: Comparable[_ <: AnyRef] => Boolean): Int
 
@@ -161,7 +164,8 @@ trait EvictionManager[C <: CacheValue, D <: CacheValue] {
    * the cache count and maps can potentially go out of sync. This method can be explicitly
    * invoked to check and bring the cache into a consistent shape.
    *
-   * @return True if the cache was consistent and false if fixes were required to the cache.
+   * @return Error messages (which are also logged as errors) if fixes were required to the cache
+   *         or empty if everything was consistent.
    */
-  def checkAndForceConsistency(): Boolean
+  def checkAndForceConsistency(): Seq[String]
 }

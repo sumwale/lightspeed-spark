@@ -65,5 +65,23 @@ trait TransformValue[C <: CacheValue, D <: CacheValue] {
    * @return Optionally return [[FinalizeValue]] instance for the given [[CacheValue]]
    *         or [[None]] if no finalization is required for the object
    */
-  def createFinalizer[T <: CacheValue](value: T): Option[FinalizeValue[T]]
+  protected def createFinalizer[T <: CacheValue](value: T): Option[FinalizeValue[T]]
+
+  /**
+   * Set the `finalizer` field of [[CacheValue]] if empty using [[createFinalizer]] and if created,
+   * put in [[EvictionService]]'s map to maintain the `WeakReference`.
+   */
+  final def addFinalizerIfMissing[T <: CacheValue](value: T): Unit = {
+    if (value.finalizer eq null) {
+      createFinalizer(value) match {
+        case Some(f) =>
+          value.finalizer = f
+          // maintain in a separate map for pending WeakReferences that will be cleared when the
+          // underlying CacheValue is finalized
+          val finalizer = value.finalizer
+          if (finalizer ne null) EvictionService.addWeakReference(finalizer)
+        case _ =>
+      }
+    }
+  }
 }

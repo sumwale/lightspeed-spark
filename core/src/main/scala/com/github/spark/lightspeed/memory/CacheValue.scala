@@ -157,7 +157,6 @@ trait CacheValue extends FreeValue {
     if (f ne null) {
       f.clear()
       f.finalizeReferent()
-      finalizer = null
     } else free()
   }
 
@@ -180,7 +179,11 @@ trait CacheValue extends FreeValue {
 
 /**
  * Base trait encapsulating the actions required to `finalize` an object like freeing off-heap
- * memory, bookkeeping with a memory manager like that of Spark etc.
+ * memory, bookkeeping with Spark's memory manager etc.
+ *
+ * This trait is implemented both by [[CacheValue]] and [[FinalizeValue]] by design to make it easy
+ * for them to inherit a common implementation since those two are required to behave in an
+ * identical manner for the same [[CacheValue]] object.
  */
 trait FreeValue {
 
