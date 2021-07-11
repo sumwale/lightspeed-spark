@@ -26,16 +26,16 @@ sourceSets.test.java.srcDirs = []
 
 dependencies {
   compileOnly coreLibraries.common
-  compile 'it.unimi.dsi:fastutil:8.4.4'
+  compile "it.unimi.dsi:fastutil:${fastutilVersion}"
 
   testCompile coreLibraries.common
   testCompile coreLibraries.spark
   testCompile coreLibraries.sparkTests
-  testCompile 'net.java.dev.jna:jna:5.6.0'
-  testCompile 'org.eclipse.collections:eclipse-collections:10.4.0'
+  testCompile "net.java.dev.jna:jna:${jnaVersion}"
+  testCompile "org.eclipse.collections:eclipse-collections:${eclipseCollectionsVersion}"
   testCompile "org.scalatest:scalatest_${scalaBinaryVersion}:${scalatestVersion}"
 
-  testRuntime "org.pegdown:pegdown:${pegdownVersion}"
+  testRuntime "com.vladsch.flexmark:flexmark-all:${flexmarkVersion}"
 }
 
 jar.classifier = 'only'
