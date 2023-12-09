@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="ScalaCompilerConfiguration">
-    <profile name="Gradle 2" modules="lightspeed-spark_2.12.lightspeed-common.main,lightspeed-spark_2.12.lightspeed-common.test,lightspeed-spark_2.12.lightspeed-core_2.12.main,lightspeed-spark_2.12.lightspeed-core_2.12.test">
+    <profile name="Gradle 1" modules="lightspeed-spark_2.12.lightspeed-common.main,lightspeed-spark_2.12.lightspeed-common.test,lightspeed-spark_2.12.lightspeed-core_2.12.main,lightspeed-spark_2.12.lightspeed-core_2.12.test">
       <option name="deprecationWarnings" value="true" />
       <option name="uncheckedWarnings" value="true" />
       <option name="featureWarnings" value="true" />
       <option name="explainTypeErrors" value="true" />
       <parameters>
-        <parameter value="-target:jvm-1.8" />
+        <parameter value="-target:jvm-11" />
         <parameter value="-Yno-adapted-args" />
       </parameters>
     </profile>

@@ -90,9 +90,9 @@ allprojects {
     vendorName = 'LightSpeed Spark'
     scalaBinaryVersion = '2.12'
 
-    sparkVersion = '3.1.2'
+    sparkVersion = '3.2.1'
     sparkPackageName = "lightspeed-spark${sparkVersion}-${version}-s_${scalaBinaryVersion}"
-    sparkDistName = "spark-${sparkVersion}-bin-hadoop2.7"
+    sparkDistName = "spark-${sparkVersion}-bin-hadoop3.2"
 
     scalaVersion = scalaBinaryVersion + '.10'
     guavaVersion = '14.0.1'
