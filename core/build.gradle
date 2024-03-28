@@ -28,6 +28,7 @@ sourceSets.test.java.srcDirs = []
 dependencies {
   compileOnly coreLibraries.common
   compileOnly coreLibraries.spark
+  compileOnly "org.scala-lang:scala-compiler:${scalaVersion}"
 
   compile project(path: ':lightspeed-common', configuration: 'shadow')
 }
